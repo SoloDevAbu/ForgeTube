@@ -1,22 +1,34 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { ProjectManager } from "../projects/projectManager.js";
 import { AudioManager } from "../audio/audioManager.js";
+import { AssetManager } from "../assets/assetManager.js";
+import { StageGraph } from "../pipeline/stageGraph.js";
 import {
   RenderManifestSchema,
   type RenderManifest,
   type CompiledScene,
   type CompiledVoiceTrack,
   type CompiledSoundEffect,
-  type CompiledMusicBed,
+  type CompiledChapter,
 } from "../schemas/renderManifest.js";
 import { atomicWriteJson, readJsonFile } from "../../shared/atomic.js";
-import { TimelineError, ValidationError } from "../../shared/errors.js";
+import { TimelineError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
 import { secondsToFrames, framesToSeconds } from "./timeMath.js";
+import {
+  computeShotTiming,
+  findShotLengthIssues,
+  type SegmentTiming,
+  type ShotInput,
+} from "./shotTiming.js";
+import { autoCameraIntensity } from "../storyboard/storyboardFormat.js";
+import { computeCropParameters } from "../calibration/cropMath.js";
+import { alignWordStarts, readVoiceTake } from "../audio/tts/voiceTake.js";
+import { countWords } from "../script/scriptFormat.js";
+import { ScriptManifestSchema } from "../schemas/script.js";
 import type { SceneRecord } from "../schemas/storyboard.js";
-import type { FitMode, CameraEffect, TransitionType } from "../../shared/types.js";
+import type { FitMode, CameraEffect } from "../../shared/types.js";
 
 export interface TimelineValidationReport {
   valid: boolean;
@@ -30,10 +42,14 @@ export interface TimelineValidationReport {
 export class TimelineCompiler {
   private pm: ProjectManager;
   private audioMgr: AudioManager;
+  private assets: AssetManager;
+  private stages: StageGraph;
 
   constructor(pm?: ProjectManager, audioMgr?: AudioManager) {
     this.pm = pm ?? new ProjectManager();
     this.audioMgr = audioMgr ?? new AudioManager(this.pm);
+    this.assets = new AssetManager(this.pm);
+    this.stages = new StageGraph(this.pm);
   }
 
   getRenderDir(projectId: string): string {
@@ -55,155 +71,156 @@ export class TimelineCompiler {
     return RenderManifestSchema.parse(raw);
   }
 
-  /**
-   * Compiles the editorial storyboard and audio mix into a frame-accurate, deterministic render manifest.
-   */
-  async compileTimeline(
-    projectId: string,
-    options?: {
-      breathingRoomSeconds?: number;
-      mode?: "scene" | "draft" | "final";
-      singleSceneId?: string;
+  private async loadScenes(projectId: string): Promise<{ scenes: SceneRecord[]; [key: string]: unknown }> {
+    const scenesPath = path.join(this.pm.getProjectRoot(projectId), "storyboard", "scenes.json");
+    if (!existsSync(scenesPath)) throw new TimelineError(`Storyboard scenes file not found at ${scenesPath}`);
+    return readJsonFile(scenesPath);
+  }
+
+  /** Segments with their measured voice, and shots in film order. */
+  async loadTimingInputs(projectId: string): Promise<{ segments: SegmentTiming[]; shots: ShotInput[] }> {
+    const root = this.pm.getProjectRoot(projectId);
+    const { scenes } = await this.loadScenes(projectId);
+    if (scenes.length === 0) throw new TimelineError("Cannot compile timeline: no scenes in storyboard.");
+
+    const script = ScriptManifestSchema.parse(await readJsonFile(path.join(root, "script", "narration.json")));
+    const mix = await this.audioMgr.getAudioMix(projectId);
+
+    const segments: SegmentTiming[] = [];
+    for (const segment of script.chapters.flatMap((c) => c.segments)) {
+      const wordCount = countWords(segment.text);
+      const track = mix.voiceTracks.find((t) => t.segmentId === segment.segment_id);
+      const take = track ? await readVoiceTake(root, track.file) : null;
+      segments.push({
+        segmentId: segment.segment_id,
+        chapterId: segment.chapter_id,
+        wordCount,
+        voiceSeconds: track?.durationSeconds ?? null,
+        wordStarts: take ? alignWordStarts(take.words, wordCount) : null,
+      });
     }
-  ): Promise<RenderManifest> {
+
+    const known = new Set(segments.map((s) => s.segmentId));
+    const shots: ShotInput[] = scenes.map((scene) => {
+      const segmentId = scene.narrationSegmentIds[0];
+      if (!segmentId || !known.has(segmentId)) {
+        throw new TimelineError(`Scene "${scene.sceneId}" points at narration "${segmentId}", which is not in the script.`);
+      }
+      return {
+        sceneId: scene.sceneId,
+        segmentId,
+        wordStart: scene.wordStart ?? null,
+        wordEnd: scene.wordEnd ?? null,
+        transitionType: scene.transition.type,
+        transitionSeconds: scene.transition.durationSeconds,
+        allowShort: scene.allowShort,
+      };
+    });
+
+    return { segments: segments.filter((s) => shots.some((shot) => shot.segmentId === s.segmentId)), shots };
+  }
+
+  /**
+   * Compiles the whole film into a frame-accurate manifest. Previews render a
+   * frame range of this manifest, so nothing else ever rewrites it.
+   */
+  async compileTimeline(projectId: string): Promise<RenderManifest> {
     const root = this.pm.getProjectRoot(projectId);
     const project = await this.pm.loadProject(projectId);
-    const logger = new Logger(path.join(root, "logs", "project.log"));
+    const { settings } = project;
+    const { fps } = settings;
 
-    logger.info("Compiling frame-accurate timeline...", { projectId, stage: "TIMELINE" });
-
-    const scenesPath = path.join(root, "storyboard", "scenes.json");
-    if (!existsSync(scenesPath)) {
-      throw new TimelineError(`Storyboard scenes file not found at ${scenesPath}`);
-    }
-
-    const scenesData = await readJsonFile<{ scenes: SceneRecord[] }>(scenesPath);
-    let rawScenes = scenesData.scenes;
-
-    if (options?.singleSceneId) {
-      rawScenes = rawScenes.filter((s) => s.sceneId === options.singleSceneId);
-      if (rawScenes.length === 0) {
-        throw new TimelineError(`Scene "${options.singleSceneId}" not found for timeline compilation.`);
-      }
-    }
-
-    if (rawScenes.length === 0) {
-      throw new TimelineError("Cannot compile timeline: no scenes in storyboard.");
-    }
-
-    const fps = project.settings.fps;
-    const breathingRoomFrames = secondsToFrames(options?.breathingRoomSeconds ?? 0.5, fps);
+    const scenesData = await this.loadScenes(projectId);
+    const { segments, shots } = await this.loadTimingInputs(projectId);
+    const timing = computeShotTiming(segments, shots, {
+      fps,
+      speakingRateWpm: settings.speakingRateWpm,
+      segmentGapSeconds: settings.segmentGapSeconds,
+      chapterGapSeconds: settings.chapterGapSeconds,
+    });
+    const timedById = new Map(timing.shots.map((s) => [s.sceneId, s]));
 
     const compiledScenes: CompiledScene[] = [];
-    const sceneStartFrameMap = new Map<string, number>();
+    for (const scene of scenesData.scenes) {
+      const timed = timedById.get(scene.sceneId)!;
+      const fit = (scene.visual.fit as FitMode) ?? "cover";
+      let crop = scene.visual.crop ?? null;
 
-    let currentTimelineFrame = 0;
-
-    for (let i = 0; i < rawScenes.length; i++) {
-      const scene = rawScenes[i]!;
-
-      // 1. Determine duration in integer frames
-      let durationFrames: number;
-      if (scene.actualVoiceDurationFrames && scene.actualVoiceDurationFrames > 0) {
-        // Priority 2: measured narration duration + breathing room
-        durationFrames = Math.max(
-          secondsToFrames(scene.suggestedDurationSeconds, fps),
-          scene.actualVoiceDurationFrames + breathingRoomFrames
-        );
-      } else {
-        // Priority 4: suggested duration in seconds converted to integer frames
-        durationFrames = secondsToFrames(scene.suggestedDurationSeconds, fps);
+      if (fit !== "contain" && existsSync(path.join(root, scene.visual.image))) {
+        const { width, height } = await this.assets.getImageSize(projectId, scene.visual.image);
+        crop = computeCropParameters({
+          sourceWidth: width,
+          sourceHeight: height,
+          targetWidth: settings.width,
+          targetHeight: settings.height,
+          fit,
+          manualCrop: scene.visual.crop,
+          position: scene.visual.position,
+          zoom: scene.visual.zoom,
+        }).normalizedCrop;
       }
 
-      if (durationFrames <= 0) {
-        durationFrames = secondsToFrames(4.0, fps); // Safety minimum
-      }
-
-      // 2. Determine transition overlap
-      const transType = scene.transition?.type ?? "cross_dissolve";
-      const transSecs = scene.transition?.durationSeconds ?? 0.5;
-      const transFrames = transType === "cut" ? 0 : secondsToFrames(transSecs, fps);
-
-      // Overlap cannot exceed 40% of either scene
-      let overlapFrames = 0;
-      if (i > 0 && transType !== "cut") {
-        const prevDuration = compiledScenes[i - 1]!.durationFrames;
-        const maxAllowedOverlap = Math.floor(Math.min(prevDuration, durationFrames) * 0.4);
-        overlapFrames = Math.min(transFrames, maxAllowedOverlap);
-      }
-
-      // 3. Compute startFrame and endFrame
-      const startFrame = i === 0 ? 0 : currentTimelineFrame - overlapFrames;
-      const endFrame = startFrame + durationFrames;
-      currentTimelineFrame = endFrame;
-
-      sceneStartFrameMap.set(scene.sceneId, startFrame);
-
-      const compiledScene: CompiledScene = {
+      const seconds = timed.durationFrames / fps;
+      compiledScenes.push({
         sceneId: scene.sceneId,
         sceneNumber: scene.sceneNumber,
         chapterId: scene.chapterId,
         title: scene.title,
-        startFrame,
-        endFrame,
-        durationFrames,
+        startFrame: timed.startFrame,
+        endFrame: timed.endFrame,
+        durationFrames: timed.durationFrames,
         imagePath: scene.visual.image,
-        fit: (scene.visual.fit as FitMode) ?? "cover",
-        crop: scene.visual.crop ?? null,
+        fit,
+        crop,
         camera: {
-          effect: (scene.camera?.effect as CameraEffect) ?? "slow_zoom_in",
-          intensity: scene.camera?.intensity ?? 0.08,
+          effect: (scene.camera?.effect as CameraEffect) ?? "static",
+          intensity: scene.camera?.intensity ?? autoCameraIntensity(seconds),
           origin: scene.camera?.origin ?? "center",
         },
         transition: {
-          type: (scene.transition?.type as TransitionType) ?? "cross_dissolve",
-          durationFrames: transFrames,
-          overlapFrames,
+          type: scene.transition.type,
+          durationFrames: timed.transitionFrames,
+          overlapFrames: timed.overlapFrames,
+          fadeOutFrames: timed.fadeOutFrames,
+          fadeOutColor: "#000000",
         },
+      });
+
+      // Each scene shows its real start, end and duration.
+      scene.timeline = {
+        startFrame: timed.startFrame,
+        endFrame: timed.endFrame,
+        durationFrames: timed.durationFrames,
+        fps,
       };
-
-      compiledScenes.push(compiledScene);
     }
 
-    const totalDurationFrames = currentTimelineFrame;
-    const totalDurationSeconds = framesToSeconds(totalDurationFrames, fps);
-
-    // 4. Compile audio tracks on the global timeline
     const audioMix = await this.audioMgr.getAudioMix(projectId);
-
-    const compiledVoiceTracks: CompiledVoiceTrack[] = [];
-    for (const vt of audioMix.voiceTracks) {
-      const sceneStart = sceneStartFrameMap.get(vt.sceneId);
-      if (sceneStart !== undefined) {
-        const durFrames = secondsToFrames(vt.durationSeconds, fps);
-        compiledVoiceTracks.push({
-          eventId: vt.eventId,
-          sceneId: vt.sceneId,
-          file: vt.file,
-          startFrame: sceneStart,
-          durationFrames: durFrames,
-          volume: vt.volume,
-          fadeInFrames: secondsToFrames(vt.fadeInSeconds, fps),
-          fadeOutFrames: secondsToFrames(vt.fadeOutSeconds, fps),
-        });
-      }
+    const voiceTracks: CompiledVoiceTrack[] = [];
+    for (const seg of timing.segments) {
+      const track = audioMix.voiceTracks.find((t) => t.segmentId === seg.segmentId);
+      if (!track) continue;
+      voiceTracks.push({
+        eventId: track.eventId,
+        segmentId: seg.segmentId,
+        file: track.file,
+        startFrame: seg.startFrame,
+        durationFrames: seg.voiceFrames,
+        volume: track.volume,
+        fadeInFrames: secondsToFrames(track.fadeInSeconds, fps),
+        fadeOutFrames: secondsToFrames(track.fadeOutSeconds, fps),
+      });
     }
 
-    const compiledSoundEffects: CompiledSoundEffect[] = [];
+    const soundEffects: CompiledSoundEffect[] = [];
     for (const sfx of audioMix.soundEffects) {
-      let startFrame = secondsToFrames(sfx.startSeconds, fps);
-      if (sfx.sceneId && sceneStartFrameMap.has(sfx.sceneId)) {
-        startFrame = sceneStartFrameMap.get(sfx.sceneId)! + startFrame;
-      }
-      const durFrames = sfx.durationSeconds
-        ? secondsToFrames(sfx.durationSeconds, fps)
-        : secondsToFrames(2.0, fps);
-
-      compiledSoundEffects.push({
+      const anchor = sfx.sceneId ? timedById.get(sfx.sceneId) : undefined;
+      if (sfx.sceneId && !anchor) continue;
+      soundEffects.push({
         eventId: sfx.eventId,
         file: sfx.file,
-        startFrame,
-        durationFrames: durFrames,
+        startFrame: (anchor?.boundaryFrame ?? 0) + secondsToFrames(sfx.startSeconds, fps),
+        durationFrames: secondsToFrames(sfx.durationSeconds ?? 2.0, fps),
         volume: sfx.volume,
         fadeInFrames: secondsToFrames(sfx.fadeInSeconds, fps),
         fadeOutFrames: secondsToFrames(sfx.fadeOutSeconds, fps),
@@ -211,115 +228,94 @@ export class TimelineCompiler {
       });
     }
 
-    const compiledMusicBeds: CompiledMusicBed[] = [];
-    for (const mb of audioMix.musicBeds) {
-      const startFrame = secondsToFrames(mb.startSeconds, fps);
-      const endFrame = mb.endSeconds
-        ? secondsToFrames(mb.endSeconds, fps)
-        : totalDurationFrames;
-
-      compiledMusicBeds.push({
-        trackId: mb.trackId,
-        file: mb.file,
-        startFrame,
-        endFrame,
-        durationFrames: Math.max(1, endFrame - startFrame),
-        volume: mb.volume,
-        fadeInFrames: secondsToFrames(mb.fadeInSeconds, fps),
-        fadeOutFrames: secondsToFrames(mb.fadeOutSeconds, fps),
-        loop: mb.loop,
-        ducking: {
-          enabled: mb.ducking?.enabled ?? true,
-          duckedVolume: mb.ducking?.duckedVolume ?? 0.08,
-          duckFadeFrames: secondsToFrames(mb.ducking?.duckFadeSeconds ?? 0.5, fps),
-        },
-      });
+    const chapters: CompiledChapter[] = [];
+    for (const seg of timing.segments) {
+      const last = chapters.at(-1);
+      if (last?.chapterId === seg.chapterId) last.endFrame = seg.endFrame;
+      else chapters.push({ chapterId: seg.chapterId, startFrame: seg.startFrame, endFrame: seg.endFrame });
     }
-
-    const renderScale =
-      options?.mode === "draft"
-        ? project.settings.draftScale
-        : 1.0;
 
     const manifest: RenderManifest = {
       schemaVersion: 1,
       projectId,
       title: project.name,
-      width: Math.round(project.settings.width * renderScale),
-      height: Math.round(project.settings.height * renderScale),
+      width: settings.width,
+      height: settings.height,
       fps,
-      totalDurationFrames,
-      totalDurationSeconds,
+      totalDurationFrames: timing.totalFrames,
+      totalDurationSeconds: framesToSeconds(timing.totalFrames, fps),
       scenes: compiledScenes,
-      audio: {
-        masterVolume: audioMix.masterVolume,
-        voiceTracks: compiledVoiceTracks,
-        soundEffects: compiledSoundEffects,
-        musicBeds: compiledMusicBeds,
-      },
+      chapters,
+      audio: { masterVolume: audioMix.masterVolume, voiceTracks, soundEffects, musicBeds: [] },
       metadata: {
         compiledAt: new Date().toISOString(),
-        mode: options?.mode ?? "final",
-        renderScale,
+        usesEstimatedTiming: timing.segments.some((s) => s.estimated),
       },
     };
 
     const validated = RenderManifestSchema.parse(manifest);
     await atomicWriteJson(this.getManifestPath(projectId), validated);
+    await atomicWriteJson(path.join(root, "storyboard", "scenes.json"), scenesData);
+    await this.stages.markBuilt(projectId, "timeline");
 
-    // Update project checkpoints
     project.checkpoints.timelineCompiled = true;
-    project.status = "TIMELINE_READY";
+    if (project.status !== "RENDERING" && project.status !== "AUDIO_READY") project.status = "TIMELINE_READY";
     await this.pm.saveProject(project);
 
-    logger.info(
-      `Timeline compiled: ${compiledScenes.length} scenes, total frames: ${totalDurationFrames} (${totalDurationSeconds}s @ ${fps}fps)`,
+    new Logger(path.join(root, "logs", "project.log")).info(
+      `Timeline compiled: ${compiledScenes.length} shots, ${timing.totalFrames} frames (${manifest.totalDurationSeconds}s @ ${fps}fps)`,
       { projectId, stage: "TIMELINE" }
     );
-
     return validated;
   }
 
   async validateTimeline(projectId: string): Promise<TimelineValidationReport> {
     const root = this.pm.getProjectRoot(projectId);
+    const project = await this.pm.loadProject(projectId);
     const manifest = await this.getRenderManifest(projectId);
+    const { settings } = project;
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // Check scenes and assets
+    const inputs = await this.loadTimingInputs(projectId);
+    for (const seg of inputs.segments) {
+      if (seg.voiceSeconds === null) errors.push(`Narration "${seg.segmentId}" has no voice yet.`);
+    }
+
+    let frame = 0;
     for (const sc of manifest.scenes) {
-      const fullImg = path.join(root, sc.imagePath);
-      if (!existsSync(fullImg)) {
+      if (!existsSync(path.join(root, sc.imagePath))) {
         errors.push(`Scene "${sc.sceneId}" image file not found: ${sc.imagePath}`);
       }
-      if (sc.durationFrames <= 0) {
-        errors.push(`Scene "${sc.sceneId}" has non-positive durationFrames: ${sc.durationFrames}`);
+      if (sc.durationFrames <= 0 || sc.endFrame <= sc.startFrame) {
+        errors.push(`Scene "${sc.sceneId}" has invalid frame range: [${sc.startFrame}, ${sc.endFrame}]`);
       }
-      if (sc.startFrame < 0 || sc.endFrame <= sc.startFrame) {
-        errors.push(
-          `Scene "${sc.sceneId}" has invalid frame range: [${sc.startFrame}, ${sc.endFrame}]`
-        );
+      if (sc.startFrame > frame) {
+        errors.push(`Black gap before "${sc.sceneId}": frames ${frame} to ${sc.startFrame} have no picture.`);
+      }
+      frame = Math.max(frame, sc.endFrame);
+    }
+
+    const issues = findShotLengthIssues(
+      { shots: manifest.scenes.map((s) => ({ ...s, boundaryFrame: s.startFrame, transitionFrames: 0, overlapFrames: 0, fadeOutFrames: 0 })), segments: [], totalFrames: manifest.totalDurationFrames },
+      inputs.shots,
+      { fps: settings.fps, maxSeconds: settings.maxShotSeconds, minSeconds: settings.minShotSeconds }
+    );
+    for (const issue of issues) {
+      const text = `Scene "${issue.sceneId}" runs ${issue.seconds}s`;
+      if (issue.kind === "too_long") {
+        errors.push(`${text}, over the ${settings.maxShotSeconds}s limit. Run "storyboard rebalance".`);
+      } else {
+        warnings.push(`${text}, under the ${settings.minShotSeconds}s minimum.`);
       }
     }
 
-    // Check audio files
     for (const vt of manifest.audio.voiceTracks) {
-      const fullAudio = path.join(root, vt.file);
-      if (!existsSync(fullAudio)) {
-        errors.push(`Voice track "${vt.eventId}" file not found: ${vt.file}`);
-      }
+      if (!existsSync(path.join(root, vt.file))) errors.push(`Voice track "${vt.eventId}" file not found: ${vt.file}`);
     }
     for (const sfx of manifest.audio.soundEffects) {
-      const fullSfx = path.join(root, sfx.file);
-      if (!existsSync(fullSfx)) {
-        errors.push(`Sound effect "${sfx.eventId}" file not found: ${sfx.file}`);
-      }
-    }
-    for (const mb of manifest.audio.musicBeds) {
-      const fullMusic = path.join(root, mb.file);
-      if (!existsSync(fullMusic)) {
-        errors.push(`Music bed "${mb.trackId}" file not found: ${mb.file}`);
-      }
+      if (!existsSync(path.join(root, sfx.file))) errors.push(`Sound effect "${sfx.eventId}" file not found: ${sfx.file}`);
+      if (sfx.startFrame >= manifest.totalDurationFrames) errors.push(`Sound effect "${sfx.eventId}" starts after the film ends.`);
     }
 
     return {
@@ -332,4 +328,3 @@ export class TimelineCompiler {
     };
   }
 }
-
