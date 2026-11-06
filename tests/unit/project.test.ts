@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { ProjectManager } from "../src/core/projects/projectManager.js";
-import { resolveSafeProjectPath, toProjectRelativePath, PathTraversalError } from "../src/shared/paths.js";
+import { ProjectManager } from "../../src/core/projects/projectManager.js";
+import { resolveSafeProjectPath, toProjectRelativePath, PathTraversalError } from "../../src/shared/paths.js";
 
 describe("ProjectManager & Path utilities", () => {
   let tmpDir: string;
@@ -61,7 +61,7 @@ describe("ProjectManager & Path utilities", () => {
     await pm.createProject({ name: "Status Test", topic: "Testing status" });
     const status = await pm.getProjectStatus("status_test");
     expect(status.status).toBe("NEW");
-    expect(status.nextCommand).toContain("research run");
+    expect(status.nextCommand).toContain("research brief");
   });
 });
 

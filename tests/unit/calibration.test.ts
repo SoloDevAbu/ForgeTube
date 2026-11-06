@@ -2,49 +2,26 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { ProjectManager } from "../src/core/projects/projectManager.js";
-import { ResearchManager } from "../src/core/research/researchManager.js";
-import { ScriptManager } from "../src/core/script/scriptManager.js";
-import { StoryboardManager } from "../src/core/storyboard/storyboardManager.js";
-import { AssetManager } from "../src/core/assets/assetManager.js";
-import { CalibrationManager } from "../src/core/calibration/calibrationManager.js";
-import { computeCropParameters, validateNormalizedCrop } from "../src/core/calibration/cropMath.js";
-import { createTestImage } from "./fixtures.js";
+import { AssetManager } from "../../src/core/assets/assetManager.js";
+import { CalibrationManager } from "../../src/core/calibration/calibrationManager.js";
+import { computeCropParameters, validateNormalizedCrop } from "../../src/core/calibration/cropMath.js";
+import { createTestImage } from "../fixtures.js";
+import { createSample, SAMPLE_ID, type SampleProject } from "../fixtures-sample.js";
 
 describe("Crop Math & CalibrationManager", () => {
+  let sample: SampleProject;
   let tmpDir: string;
-  let pm: ProjectManager;
-  let rm: ResearchManager;
-  let sm: ScriptManager;
-  let stm: StoryboardManager;
   let am: AssetManager;
   let cm: CalibrationManager;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "forgetube-calib-test-"));
-    pm = new ProjectManager(tmpDir);
-    rm = new ResearchManager(pm);
-    sm = new ScriptManager(pm, rm);
-    stm = new StoryboardManager(pm, sm, rm);
-    am = new AssetManager(pm);
-    cm = new CalibrationManager(pm);
-
-    await pm.createProject({
-      name: "History of Rome",
-      topic: "The complete history of Rome",
-      targetMinutes: 12,
-    });
-    await rm.runResearch("history_of_rome");
-    await rm.approveResearch("history_of_rome");
-    await sm.generateScript("history_of_rome");
-    await sm.approveScript("history_of_rome");
-    await stm.generateStoryboard("history_of_rome");
-    await stm.approveStoryboard("history_of_rome");
+    sample = await createSample("storyboard");
+    tmpDir = sample.tmpDir;
+    am = new AssetManager(sample.pm);
+    cm = new CalibrationManager(sample.pm);
   });
 
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
-  });
+  afterEach(() => sample.cleanup());
 
   it("validates crop math correctly for cover and manual modes", () => {
     // 1. Cover mode with wider image (2000x1000 into 1920x1080)
@@ -73,7 +50,7 @@ describe("Crop Math & CalibrationManager", () => {
     const rawImg = path.join(tmpDir, "scene_001.png");
     await createTestImage(rawImg, 1920, 1080, "red");
 
-    const importResult = await am.importImages("history_of_rome", {
+    const importResult = await am.importImages(SAMPLE_ID, {
       inputPath: rawImg,
       sceneId: "scene_001",
     });
@@ -81,19 +58,19 @@ describe("Crop Math & CalibrationManager", () => {
     expect(importResult.importedCount).toBe(1);
     expect(importResult.importedAssets[0]?.width).toBe(1920);
     expect(importResult.importedAssets[0]?.height).toBe(1080);
-    expect(importResult.importedAssets[0]?.relativePath).toBe("assets/generated/scene_001.png");
+    expect(importResult.importedAssets[0]?.relativePath).toBe("assets/generated/originals/scene_001/v01_scene_001.png");
   });
 
   it("sets manual calibration and generates a preview still", async () => {
     const rawImg = path.join(tmpDir, "scene_001.png");
     await createTestImage(rawImg, 1920, 1080, "gold");
-    await am.importImages("history_of_rome", {
+    await am.importImages(SAMPLE_ID, {
       inputPath: rawImg,
       sceneId: "scene_001",
     });
 
     // Set manual crop: center 80%
-    const calib = await cm.setCalibration("history_of_rome", "scene_001", {
+    const calib = await cm.setCalibration(SAMPLE_ID, "scene_001", {
       fit: "manual",
       x: 0.1,
       y: 0.1,
@@ -105,7 +82,7 @@ describe("Crop Math & CalibrationManager", () => {
     expect(calib.crop?.width).toBe(0.8);
 
     // Generate preview still
-    const preview = await cm.generateCalibrationPreview("history_of_rome", "scene_001");
+    const preview = await cm.generateCalibrationPreview(SAMPLE_ID, "scene_001");
     expect(preview.previewPath).toContain("scene_001_preview.png");
     const exists = await fs.stat(preview.previewPath);
     expect(exists.size).toBeGreaterThan(0);
