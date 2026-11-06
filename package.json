@@ -8,10 +8,11 @@
     "video-studio": "./bin/video-studio.js"
   },
   "scripts": {
-    "video-studio": "node bin/video-studio.js",
-    "test": "bun test tests/project.test.ts tests/research.test.ts tests/script.test.ts tests/storyboard.test.ts tests/calibration.test.ts tests/timeline.test.ts",
-    "test:unit": "bun test tests/project.test.ts tests/research.test.ts tests/script.test.ts tests/storyboard.test.ts tests/calibration.test.ts tests/timeline.test.ts",
-    "test:e2e": "tsx --test tests/e2e.test.ts"
+    "video-studio": "bun bin/video-studio.js",
+    "test": "bun test tests/unit",
+    "test:unit": "bun test tests/unit",
+    "test:e2e": "bun test tests/e2e --timeout 240000",
+    "typecheck": "tsc --noEmit"
   },
   "private": true,
   "devDependencies": {
@@ -19,15 +20,11 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "tsx": "^4.23.15"
-  },
-  "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
     "@remotion/bundler": "^4.0.541",
     "@remotion/renderer": "^4.0.541",
-    "@remotion/transitions": "^4.0.541",
     "commander": "^15.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
