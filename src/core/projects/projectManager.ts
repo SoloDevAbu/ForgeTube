@@ -58,7 +58,7 @@ export class ProjectManager {
     await ensureProjectDirectories(root);
 
     const now = new Date().toISOString();
-    const manifest: ProjectManifest = {
+    const validated = ProjectManifestSchema.parse({
       schemaVersion: 1,
       id,
       name: options.name,
@@ -71,26 +71,8 @@ export class ProjectManager {
         width: options.width ?? 1920,
         height: options.height ?? 1080,
         fps: options.fps ?? 30,
-        defaultTransition: "cross_dissolve",
-        defaultTransitionDurationSeconds: 0.5,
-        defaultCameraEffect: "slow_zoom_in",
-        draftScale: 0.5,
-        speakingRateWpm: 140,
-        renderConcurrency: 1,
       },
-      checkpoints: {
-        researchApproved: false,
-        scriptApproved: false,
-        storyboardApproved: false,
-        promptsExported: false,
-        assetsImported: false,
-        calibrationApproved: false,
-        audioApproved: false,
-        timelineCompiled: false,
-      },
-    };
-
-    const validated = ProjectManifestSchema.parse(manifest);
+    });
     await atomicWriteJson(this.getManifestPath(id), validated);
 
     const logger = new Logger(path.join(root, "logs", "project.log"));
@@ -293,47 +275,43 @@ function getNextRecommendedCommand(
 ): string {
   switch (manifest.status) {
     case "NEW":
-      return `video-studio research run --project ${manifest.id}`;
     case "RESEARCH_IN_PROGRESS":
-      return `video-studio research validate --project ${manifest.id}`;
+      return `video-studio research brief --project ${manifest.id}`;
     case "RESEARCH_REVIEW":
       return manifest.checkpoints.researchApproved
-        ? `video-studio script generate --project ${manifest.id}`
+        ? `video-studio script brief --project ${manifest.id}`
         : `video-studio research approve --project ${manifest.id}`;
     case "SCRIPT_IN_PROGRESS":
-      return `video-studio script validate --project ${manifest.id}`;
+      return `video-studio script brief --project ${manifest.id}`;
     case "SCRIPT_REVIEW":
       return manifest.checkpoints.scriptApproved
-        ? `video-studio storyboard generate --project ${manifest.id}`
+        ? `video-studio storyboard brief --project ${manifest.id}`
         : `video-studio script approve --project ${manifest.id}`;
     case "STORYBOARD_IN_PROGRESS":
-      return `video-studio storyboard validate --project ${manifest.id}`;
+      return `video-studio storyboard brief --project ${manifest.id}`;
     case "STORYBOARD_REVIEW":
       return manifest.checkpoints.storyboardApproved
         ? `video-studio prompts export --project ${manifest.id}`
         : `video-studio storyboard approve --project ${manifest.id}`;
-    case "PROMPTS_READY":
     case "WAITING_FOR_MANUAL_IMAGES":
       if (stats.imagesMissing > 0) {
-        return `Generate images in Google Flow, then run: video-studio assets import --project ${manifest.id} --input <dir>`;
+        return `Generate images in Google Flow, then run: video-studio assets import --project ${manifest.id} --input <dir> --order`;
       }
       return `video-studio assets validate --project ${manifest.id}`;
     case "ASSETS_IMPORTED":
-    case "CALIBRATION_IN_PROGRESS":
-      return `video-studio calibration preview --project ${manifest.id} --scene scene_001`;
+      return `video-studio calibration apply-preset --project ${manifest.id} --preset gemini-watermark`;
     case "CALIBRATION_COMPLETE":
-      return `video-studio audio import --project ${manifest.id} --input ./voice/`;
-    case "AUDIO_IN_PROGRESS":
-      return `video-studio audio inspect --project ${manifest.id}`;
-    case "AUDIO_READY":
-      return `video-studio timeline compile --project ${manifest.id}`;
+      return `video-studio audio voice --project ${manifest.id}`;
     case "TIMELINE_READY":
-    case "READY_TO_RENDER":
+      return manifest.checkpoints.audioApproved
+        ? `video-studio render --project ${manifest.id} --mode draft`
+        : `video-studio audio mix --project ${manifest.id}`;
+    case "AUDIO_READY":
       return `video-studio render --project ${manifest.id} --mode draft`;
     case "RENDERING":
       return `video-studio jobs status --project ${manifest.id}`;
     case "RENDERED":
-      return `video-studio render --project ${manifest.id} --mode final`;
+      return `Finished. Output is in projects/${manifest.id}/render/final`;
     case "FAILED":
       return `Inspect error logs at projects/${manifest.id}/logs/project.log`;
     default:
