@@ -5,18 +5,20 @@ import { ProjectManager } from "../projects/projectManager.js";
 import {
   AudioMixManifestSchema,
   type AudioMixManifest,
-  type VoiceTrackEvent,
   type SoundEffectTrackEvent,
-  type MusicBed,
 } from "../schemas/audio.js";
 import { atomicWriteJson, readJsonFile } from "../../shared/atomic.js";
-import { AssetError, ValidationError } from "../../shared/errors.js";
-import { Logger } from "../../shared/logger.js";
-import { inspectMedia } from "../assets/mediaInspector.js";
-import { secondsToFrames } from "../timeline/timeMath.js";
+import { ValidationError } from "../../shared/errors.js";
+import { computeFileChecksum, inspectMedia } from "../assets/mediaInspector.js";
+import { loadToolConfig, runCliCommand } from "../providers/cliAdapter.js";
 import type { SceneRecord } from "../schemas/storyboard.js";
 
-const AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".aac", ".m4a", ".ogg", ".flac"]);
+export interface SfxPlanResult {
+  planned: number;
+  rendered: string[];
+  reused: string[];
+  failed: { soundId: string; message: string }[];
+}
 
 export class AudioManager {
   private pm: ProjectManager;
@@ -41,8 +43,19 @@ export class AudioManager {
         updatedAt: new Date().toISOString(),
       };
     }
-    const raw = await readJsonFile(p);
-    return AudioMixManifestSchema.parse(raw);
+    const mix = AudioMixManifestSchema.parse(await readJsonFile(p));
+
+    // Older projects keyed voice by scene.
+    if (mix.voiceTracks.some((t) => !t.segmentId)) {
+      const scenesPath = path.join(this.pm.getProjectRoot(projectId), "storyboard", "scenes.json");
+      if (existsSync(scenesPath)) {
+        const { scenes } = await readJsonFile<{ scenes: SceneRecord[] }>(scenesPath);
+        for (const track of mix.voiceTracks) {
+          track.segmentId ??= scenes.find((s) => s.sceneId === track.sceneId)?.narrationSegmentIds[0] ?? null;
+        }
+      }
+    }
+    return mix;
   }
 
   async saveAudioMix(projectId: string, mix: AudioMixManifest): Promise<void> {
@@ -51,235 +64,112 @@ export class AudioManager {
     await atomicWriteJson(this.getAudioMixPath(projectId), validated);
   }
 
-  /**
-   * Imports narration audio files (single file or directory), measures actual durations via FFprobe,
-   * copies to assets/voice/, and links to scene records and audio-mix.
-   */
-  async importVoiceAudio(
-    projectId: string,
-    options: { inputPath: string; sceneId?: string }
-  ): Promise<{ importedCount: number; importedTracks: VoiceTrackEvent[] }> {
-    const root = this.pm.getProjectRoot(projectId);
-    const project = await this.pm.loadProject(projectId);
-    const logger = new Logger(path.join(root, "logs", "project.log"));
-    const voiceDir = path.join(root, "assets", "voice");
-    await fs.mkdir(voiceDir, { recursive: true });
-
-    if (!existsSync(options.inputPath)) {
-      throw new ValidationError(`Input path not found: "${options.inputPath}"`);
-    }
-
-    const filesToProcess: string[] = [];
-    const stat = await fs.stat(options.inputPath);
-
-    if (stat.isDirectory()) {
-      const entries = await fs.readdir(options.inputPath, { recursive: true, withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (AUDIO_EXTENSIONS.has(ext)) {
-            const fullPath = (entry as any).parentPath
-              ? path.join((entry as any).parentPath, entry.name)
-              : path.join(options.inputPath, entry.name);
-            filesToProcess.push(fullPath);
-          }
-        }
-      }
-    } else {
-      const ext = path.extname(options.inputPath).toLowerCase();
-      if (!AUDIO_EXTENSIONS.has(ext)) {
-        throw new ValidationError(`Unsupported audio format: ${options.inputPath}`);
-      }
-      filesToProcess.push(options.inputPath);
-    }
-
-    if (filesToProcess.length === 0) {
-      throw new ValidationError(`No valid audio files found in: ${options.inputPath}`);
-    }
-
-    const scenesPath = path.join(root, "storyboard", "scenes.json");
-    let scenesData: { scenes: SceneRecord[] } | null = null;
-    if (existsSync(scenesPath)) {
-      scenesData = await readJsonFile(scenesPath);
-    }
-
-    const audioMix = await this.getAudioMix(projectId);
-    const importedTracks: VoiceTrackEvent[] = [];
-
-    for (const file of filesToProcess) {
-      const filename = path.basename(file);
-      let targetSceneId = options.sceneId;
-
-      if (!targetSceneId) {
-        const match = filename.match(/scene_(\d+)/i);
-        if (match) {
-          targetSceneId = `scene_${match[1]?.padStart(3, "0")}`;
-        }
-      }
-
-      if (!targetSceneId) {
-        throw new ValidationError(
-          `Could not determine scene ID from filename "${filename}". Specify --scene <sceneId>`
-        );
-      }
-
-      // Inspect audio with FFprobe
-      logger.info(`Measuring audio duration via ffprobe: ${filename}`, { projectId, stage: "AUDIO" });
-      const meta = await inspectMedia(file);
-
-      if (!meta.durationSeconds || meta.durationSeconds <= 0) {
-        throw new AssetError(`Unable to measure duration for audio file: ${file}`);
-      }
-
-      const targetFilename = `${targetSceneId}.wav`;
-      const targetPath = path.join(voiceDir, targetFilename);
-      await fs.copyFile(file, targetPath);
-
-      const relativePath = `assets/voice/${targetFilename}`;
-      const voiceDurationFrames = secondsToFrames(meta.durationSeconds, project.settings.fps);
-
-      const trackEvent: VoiceTrackEvent = {
-        eventId: `voice_${targetSceneId}`,
-        sceneId: targetSceneId,
-        file: relativePath,
-        startSeconds: 0, // Resolved dynamically during timeline compilation
-        durationSeconds: meta.durationSeconds,
-        volume: 1.0,
-        fadeInSeconds: 0.05,
-        fadeOutSeconds: 0.05,
-      };
-
-      // Update audio mix
-      const existingIdx = audioMix.voiceTracks.findIndex((t) => t.sceneId === targetSceneId);
-      if (existingIdx >= 0) {
-        audioMix.voiceTracks[existingIdx] = trackEvent;
-      } else {
-        audioMix.voiceTracks.push(trackEvent);
-      }
-      importedTracks.push(trackEvent);
-
-      // Update scene record with actual measured voice duration
-      if (scenesData) {
-        const sc = scenesData.scenes.find((s) => s.sceneId === targetSceneId);
-        if (sc) {
-          sc.audio.voice = relativePath;
-          sc.actualVoiceDurationFrames = voiceDurationFrames;
-          sc.status.audio = "ready";
-        }
-      }
-    }
-
-    await this.saveAudioMix(projectId, audioMix);
-
-    if (scenesData) {
-      await atomicWriteJson(scenesPath, scenesData);
-    }
-
-    return {
-      importedCount: importedTracks.length,
-      importedTracks,
+  upsertVoiceTrack(mix: AudioMixManifest, segmentId: string, file: string, durationSeconds: number): void {
+    const track = {
+      eventId: `voice_${segmentId}`,
+      segmentId,
+      sceneId: null,
+      file,
+      startSeconds: 0,
+      durationSeconds,
+      volume: 1.0,
+      fadeInSeconds: 0,
+      fadeOutSeconds: 0,
     };
+    const index = mix.voiceTracks.findIndex((t) => t.segmentId === segmentId);
+    if (index >= 0) mix.voiceTracks[index] = track;
+    else mix.voiceTracks.push(track);
   }
 
   /**
-   * Imports a sound effect asset.
+   * Adds a sound effect file. The event ID comes from the file's content and
+   * placement, so running the same command twice changes nothing.
    */
-  async importSoundEffect(
+  async addSoundEffect(
     projectId: string,
-    options: {
-      inputPath: string;
-      sceneId?: string;
-      offsetSeconds?: number;
-      volume?: number;
-      fadeInSeconds?: number;
-      fadeOutSeconds?: number;
-      loop?: boolean;
-    }
+    options: { inputPath: string; sceneId?: string; offsetSeconds?: number; volume?: number; loop?: boolean }
   ): Promise<SoundEffectTrackEvent> {
+    if (!existsSync(options.inputPath)) throw new ValidationError(`SFX file not found: ${options.inputPath}`);
+
     const root = this.pm.getProjectRoot(projectId);
-    const sfxDir = path.join(root, "assets", "sound-effects");
-    await fs.mkdir(sfxDir, { recursive: true });
-
-    if (!existsSync(options.inputPath)) {
-      throw new ValidationError(`SFX file not found: ${options.inputPath}`);
-    }
-
+    const checksum = await computeFileChecksum(options.inputPath);
     const meta = await inspectMedia(options.inputPath);
-    const filename = path.basename(options.inputPath);
-    const targetPath = path.join(sfxDir, filename);
-    await fs.copyFile(options.inputPath, targetPath);
+    const filename = `${checksum.slice(0, 12)}_${path.basename(options.inputPath)}`;
+    const target = path.join(root, "assets", "sound-effects", filename);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(options.inputPath, target);
 
-    const relativePath = `assets/sound-effects/${filename}`;
-    const sfxEvent: SoundEffectTrackEvent = {
-      eventId: `sfx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    const event: SoundEffectTrackEvent = {
+      eventId: `sfx_${options.sceneId ?? "film"}_${checksum.slice(0, 8)}_${options.offsetSeconds ?? 0}`,
       sceneId: options.sceneId ?? null,
-      file: relativePath,
+      file: `assets/sound-effects/${filename}`,
       startSeconds: options.offsetSeconds ?? 0,
       durationSeconds: meta.durationSeconds ?? null,
       volume: options.volume ?? 0.5,
-      fadeInSeconds: options.fadeInSeconds ?? 0.2,
-      fadeOutSeconds: options.fadeOutSeconds ?? 0.3,
+      fadeInSeconds: 0,
+      fadeOutSeconds: 0.05,
       loop: options.loop ?? false,
     };
 
     const mix = await this.getAudioMix(projectId);
-    mix.soundEffects.push(sfxEvent);
+    const index = mix.soundEffects.findIndex((e) => e.eventId === event.eventId);
+    if (index >= 0) mix.soundEffects[index] = event;
+    else mix.soundEffects.push(event);
     await this.saveAudioMix(projectId, mix);
-
-    return sfxEvent;
+    return event;
   }
 
   /**
-   * Imports background music bed.
+   * Renders the storyboard's sfx= suggestions with earshot. Each sound renders
+   * once per project and takes are reused. Hand-added effects are left alone.
    */
-  async importMusicBed(
-    projectId: string,
-    options: {
-      inputPath: string;
-      startSeconds?: number;
-      volume?: number;
-      fadeInSeconds?: number;
-      fadeOutSeconds?: number;
-      loop?: boolean;
-      ducking?: boolean;
-    }
-  ): Promise<MusicBed> {
+  async renderPlannedSfx(projectId: string): Promise<SfxPlanResult> {
     const root = this.pm.getProjectRoot(projectId);
-    const musicDir = path.join(root, "assets", "music");
-    await fs.mkdir(musicDir, { recursive: true });
+    const { earshot } = await loadToolConfig();
+    if (!earshot) throw new ValidationError("earshot not found. Set earshot in forgetube.config.json.");
 
-    if (!existsSync(options.inputPath)) {
-      throw new ValidationError(`Music file not found: ${options.inputPath}`);
+    const { scenes } = await readJsonFile<{ scenes: SceneRecord[] }>(path.join(root, "storyboard", "scenes.json"));
+    const planned = scenes.flatMap((s) => s.sfxSuggestions.map((soundId) => ({ sceneId: s.sceneId, soundId })));
+
+    const sfxDir = path.join(root, "assets", "sound-effects", "earshot");
+    await fs.mkdir(sfxDir, { recursive: true });
+
+    const result: SfxPlanResult = { planned: planned.length, rendered: [], reused: [], failed: [] };
+    const durations = new Map<string, number>();
+
+    for (const soundId of new Set(planned.map((p) => p.soundId))) {
+      const file = path.join(sfxDir, `${soundId.replace(/[^a-z0-9_-]/gi, "_")}.wav`);
+      if (existsSync(file)) {
+        result.reused.push(soundId);
+      } else {
+        const render = await runCliCommand(earshot, ["sfx", "render", soundId, "-o", file]);
+        if (render.exitCode !== 0) {
+          result.failed.push({ soundId, message: render.stderr.slice(-300) });
+          continue;
+        }
+        result.rendered.push(soundId);
+      }
+      durations.set(soundId, (await inspectMedia(file)).durationSeconds ?? 2);
     }
-
-    const meta = await inspectMedia(options.inputPath);
-    const filename = path.basename(options.inputPath);
-    const targetPath = path.join(musicDir, filename);
-    await fs.copyFile(options.inputPath, targetPath);
-
-    const relativePath = `assets/music/${filename}`;
-    const musicBed: MusicBed = {
-      trackId: `music_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      file: relativePath,
-      startSeconds: options.startSeconds ?? 0,
-      endSeconds: null, // Covers composition duration
-      volume: options.volume ?? 0.2,
-      fadeInSeconds: options.fadeInSeconds ?? 1.5,
-      fadeOutSeconds: options.fadeOutSeconds ?? 2.0,
-      loop: options.loop ?? true,
-      ducking: {
-        enabled: options.ducking ?? true,
-        duckedVolume: 0.08,
-        duckFadeSeconds: 0.5,
-      },
-      volumeEnvelope: [],
-    };
 
     const mix = await this.getAudioMix(projectId);
-    mix.musicBeds.push(musicBed);
+    mix.soundEffects = mix.soundEffects.filter((e) => !e.eventId.startsWith("sfxplan_"));
+    for (const { sceneId, soundId } of planned) {
+      if (!durations.has(soundId)) continue;
+      const name = soundId.replace(/[^a-z0-9_-]/gi, "_");
+      mix.soundEffects.push({
+        eventId: `sfxplan_${sceneId}_${name}`,
+        sceneId,
+        file: `assets/sound-effects/earshot/${name}.wav`,
+        startSeconds: 0,
+        durationSeconds: durations.get(soundId)!,
+        volume: 0.7,
+        fadeInSeconds: 0,
+        fadeOutSeconds: 0.05,
+        loop: false,
+      });
+    }
     await this.saveAudioMix(projectId, mix);
-
-    return musicBed;
+    return result;
   }
 }
-
