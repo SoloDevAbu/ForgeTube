@@ -1,6 +1,9 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+/** Repository root, so the CLI works from any working directory. */
+export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export class PathTraversalError extends Error {
   constructor(attemptedPath: string, rootDir: string) {
@@ -14,7 +17,7 @@ export class PathTraversalError extends Error {
  */
 export function getProjectsDir(customBase?: string): string {
   if (customBase) return path.resolve(customBase);
-  return path.resolve(process.cwd(), "projects");
+  return path.join(REPO_ROOT, "projects");
 }
 
 /**
@@ -72,7 +75,6 @@ export const PROJECT_SUBDIRS = [
   "storyboard",
   "assets/references",
   "assets/generated",
-  "assets/prepared",
   "assets/voice",
   "assets/sound-effects",
   "assets/music",
@@ -80,6 +82,7 @@ export const PROJECT_SUBDIRS = [
   "editing",
   "render/preview",
   "render/final",
+  "pipeline",
   "logs",
 ] as const;
 

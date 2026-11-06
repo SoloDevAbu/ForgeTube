@@ -13,6 +13,9 @@ export const CompiledSceneTransitionSchema = z.object({
   type: z.enum(TransitionTypeValues),
   durationFrames: z.number().int().nonnegative(),
   overlapFrames: z.number().int().nonnegative(),
+  /** Frames at the end of this scene that fade out, before a fade transition. */
+  fadeOutFrames: z.number().int().nonnegative().default(0),
+  fadeOutColor: z.string().default("#000000"),
 });
 export type CompiledSceneTransition = z.infer<typeof CompiledSceneTransitionSchema>;
 
@@ -34,7 +37,7 @@ export type CompiledScene = z.infer<typeof CompiledSceneSchema>;
 
 export const CompiledVoiceTrackSchema = z.object({
   eventId: z.string().min(1),
-  sceneId: z.string().min(1),
+  segmentId: z.string().min(1),
   file: z.string().min(1), // relative path
   startFrame: z.number().int().nonnegative(),
   durationFrames: z.number().int().positive(),
@@ -74,6 +77,13 @@ export const CompiledMusicBedSchema = z.object({
 });
 export type CompiledMusicBed = z.infer<typeof CompiledMusicBedSchema>;
 
+export const CompiledChapterSchema = z.object({
+  chapterId: z.string().min(1),
+  startFrame: z.number().int().nonnegative(),
+  endFrame: z.number().int().positive(),
+});
+export type CompiledChapter = z.infer<typeof CompiledChapterSchema>;
+
 export const CompiledAudioManifestSchema = z.object({
   masterVolume: z.number().min(0).max(1).default(1.0),
   voiceTracks: z.array(CompiledVoiceTrackSchema).default([]),
@@ -92,11 +102,12 @@ export const RenderManifestSchema = z.object({
   totalDurationFrames: z.number().int().positive(),
   totalDurationSeconds: z.number().positive(),
   scenes: z.array(CompiledSceneSchema),
+  chapters: z.array(CompiledChapterSchema).default([]),
   audio: CompiledAudioManifestSchema,
   metadata: z.object({
     compiledAt: z.string(),
-    mode: z.enum(["scene", "draft", "final"]).default("final"),
-    renderScale: z.number().min(0.1).max(1.0).default(1.0),
+    /** True when any narration timing came from a word-count estimate. */
+    usesEstimatedTiming: z.boolean().default(false),
   }),
 });
 export type RenderManifest = z.infer<typeof RenderManifestSchema>;

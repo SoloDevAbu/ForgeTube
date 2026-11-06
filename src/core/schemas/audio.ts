@@ -19,7 +19,7 @@ export const MusicBedSchema = z.object({
     enabled: z.boolean().default(true),
     duckedVolume: z.number().min(0).max(1).default(0.08),
     duckFadeSeconds: z.number().nonnegative().default(0.5),
-  }).default({}),
+  }).prefault({}),
   volumeEnvelope: z.array(VolumeKeyframeSchema).default([]),
 });
 export type MusicBed = z.infer<typeof MusicBedSchema>;
@@ -39,7 +39,9 @@ export type SoundEffectTrackEvent = z.infer<typeof SoundEffectTrackEventSchema>;
 
 export const VoiceTrackEventSchema = z.object({
   eventId: z.string().min(1),
-  sceneId: z.string().min(1),
+  /** Narration segment this take belongs to. Old projects stored only sceneId. */
+  segmentId: z.string().min(1).nullable().default(null),
+  sceneId: z.string().min(1).nullable().default(null),
   file: z.string().min(1), // relative path
   startSeconds: z.number().nonnegative(),
   durationSeconds: z.number().positive(),

@@ -19,6 +19,8 @@ export const SourceSchema = z.object({
   source_type: SourceTypeSchema.default("academic_book_or_article"),
   published_at: z.string().nullable().default(null),
   accessed_at: z.string(),
+  /** True only when the page or document was actually read for this project. */
+  opened: z.boolean().default(false),
   notes: z.string().default(""),
 });
 export type Source = z.infer<typeof SourceSchema>;
@@ -29,9 +31,13 @@ export type Confidence = z.infer<typeof ConfidenceSchema>;
 export const ClaimStatusSchema = z.enum(["verified", "unverified"]);
 export type ClaimStatus = z.infer<typeof ClaimStatusSchema>;
 
+export const ClaimKindSchema = z.enum(["fact", "tradition", "estimate", "debated"]);
+export type ClaimKind = z.infer<typeof ClaimKindSchema>;
+
 export const ClaimSchema = z.object({
   claim_id: z.string().min(1),
   claim: z.string().min(1),
+  kind: ClaimKindSchema.default("fact"),
   time_period: z.string().min(1),
   confidence: ConfidenceSchema.default("high"),
   evidence_source_ids: z.array(z.string()).min(1),
@@ -63,6 +69,7 @@ export const ChapterOutlineSchema = z.object({
   time_period: z.string().min(1),
   summary: z.string().min(1),
   estimated_duration_seconds: z.number().positive(),
+  claim_ids: z.array(z.string()).default([]),
 });
 export type ChapterOutline = z.infer<typeof ChapterOutlineSchema>;
 

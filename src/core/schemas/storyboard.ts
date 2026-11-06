@@ -22,12 +22,17 @@ export const SceneVisualSchema = z.object({
   image: z.string().min(1),
   fit: z.enum(FitModeValues).default("cover"),
   crop: NormalizedCropSchema.nullable().default(null),
+  /** Where the 16:9 window sits in the leftover image, 0 to 1 on each axis. */
+  position: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }).default({ x: 0.5, y: 0.5 }),
+  /** Extra zoom into the image, used to crop away watermarks. */
+  zoom: z.number().min(1).max(3).default(1),
 });
 export type SceneVisual = z.infer<typeof SceneVisualSchema>;
 
 export const SceneCameraSchema = z.object({
   effect: z.enum(CameraEffectValues).default("slow_zoom_in"),
-  intensity: z.number().min(0).max(0.5).default(0.08),
+  /** Null means automatic: sized to the shot length so short shots don't lurch. */
+  intensity: z.number().min(0).max(0.5).nullable().default(null),
   origin: z.enum([
     "center",
     "top",
@@ -44,8 +49,8 @@ export const SceneCameraSchema = z.object({
 export type SceneCamera = z.infer<typeof SceneCameraSchema>;
 
 export const SceneTransitionSchema = z.object({
-  type: z.enum(TransitionTypeValues).default("cross_dissolve"),
-  durationSeconds: z.number().nonnegative().default(0.5),
+  type: z.enum(TransitionTypeValues).default("cut"),
+  durationSeconds: z.number().nonnegative().default(0.25),
 });
 export type SceneTransition = z.infer<typeof SceneTransitionSchema>;
 
@@ -69,7 +74,7 @@ export type SceneAudio = z.infer<typeof SceneAudioSchema>;
 
 export const SceneStatusSchema = z.object({
   image: z.enum(["missing", "imported", "verified"]).default("missing"),
-  calibration: z.enum(["not_started", "reviewed", "approved"]).default("not_started"),
+  calibration: z.enum(["not_started", "reviewed", "calibrated", "approved"]).default("not_started"),
   audio: z.enum(["missing", "ready"]).default("missing"),
   review: z.enum(["needs_review", "approved"]).default("needs_review"),
 });
@@ -83,17 +88,26 @@ export const SceneRecordSchema = z.object({
   title: z.string().min(1),
   narrationSegmentIds: z.array(z.string()).default([]),
   narration: z.string().default(""),
+  /** Word span inside the narration segment. wordEnd is exclusive. */
+  wordStart: z.number().int().nonnegative().nullable().default(null),
+  wordEnd: z.number().int().positive().nullable().default(null),
+  /** Author marked this shot as deliberately under the minimum length. */
+  allowShort: z.boolean().default(false),
+  shortPrompt: z.string().default(""),
+  batchId: z.string().default(""),
+  sfxSuggestions: z.array(z.string()).default([]),
+  musicMood: z.string().default(""),
   visualPurpose: z.string().min(1),
   suggestedDurationSeconds: z.number().positive(),
   actualVoiceDurationFrames: z.number().int().positive().nullable().default(null),
-  timeline: SceneTimelineSchema.default({}),
+  timeline: SceneTimelineSchema.prefault({}),
   visual: SceneVisualSchema,
-  camera: SceneCameraSchema.default({}),
-  transition: SceneTransitionSchema.default({}),
-  audio: SceneAudioSchema.default({}),
+  camera: SceneCameraSchema.prefault({}),
+  transition: SceneTransitionSchema.prefault({}),
+  audio: SceneAudioSchema.prefault({}),
   imagePromptId: z.string().min(1),
   sourceClaimIds: z.array(z.string()).default([]),
-  status: SceneStatusSchema.default({}),
+  status: SceneStatusSchema.prefault({}),
 });
 export type SceneRecord = z.infer<typeof SceneRecordSchema>;
 
@@ -106,6 +120,8 @@ export const VisualStyleGuideSchema = z.object({
   cameraAndComposition: z.string().min(1),
   negativePromptRules: z.array(z.string()).default([]),
   continuityRules: z.array(z.string()).default([]),
+  characters: z.record(z.string(), z.string()).default({}),
+  locations: z.record(z.string(), z.string()).default({}),
 });
 export type VisualStyleGuide = z.infer<typeof VisualStyleGuideSchema>;
 
@@ -128,6 +144,7 @@ export const StoryboardManifestSchema = z.object({
   visualStyleGuide: VisualStyleGuideSchema,
   prompts: z.array(ImagePromptSchema),
   status: z.enum(["draft", "approved"]).default("draft"),
+  chapterMoods: z.record(z.string(), z.string()).default({}),
   updatedAt: z.string(),
 });
 export type StoryboardManifest = z.infer<typeof StoryboardManifestSchema>;

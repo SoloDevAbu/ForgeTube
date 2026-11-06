@@ -20,7 +20,7 @@ export type SceneCalibration = z.infer<typeof SceneCalibrationSchema>;
 
 export const CalibrationManifestSchema = z.object({
   schemaVersion: z.literal(1).default(1),
-  scenes: z.record(z.string(), SceneCalibrationSchema).default({}),
+  scenes: z.record(z.string(), SceneCalibrationSchema).prefault({}),
   updatedAt: z.string(),
 });
 export type CalibrationManifest = z.infer<typeof CalibrationManifestSchema>;
