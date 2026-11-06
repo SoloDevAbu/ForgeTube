@@ -1,114 +1,111 @@
 import { Command } from "commander";
+import fs from "node:fs/promises";
 import { ScriptManager } from "../../core/script/scriptManager.js";
-import { printOutput, printError } from "../output.js";
+import { bad, guarded, ok, printIssues, printOutput } from "../output.js";
 
 export function registerScriptCommands(program: Command, sm: ScriptManager): void {
-  const scriptCmd = program.command("script").description("Documentary narration script workflow");
+  const cmd = program.command("script").description("Narration script: written by Claude Code, checked here");
+  const json = () => Boolean(program.opts().json);
 
-  scriptCmd
-    .command("generate")
-    .description("Generate structured narration script and markdown from approved research")
+  cmd
+    .command("brief")
+    .description("Print the writing brief, for the whole film or one chapter")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await sm.generateScript(options.project);
+    .option("-c, --chapter <id>", "Chapter ID")
+    .action(guarded(program, async (o) => console.log(await sm.buildBrief(o.project, o.chapter))));
 
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Script generated successfully for project "${options.project}"`);
-          console.log(`  Chapters: ${manifest.chapters.length}`);
-          console.log(`  Total Words: ${manifest.totalWordCount}`);
-          console.log(`  Estimated Narration Duration: ${manifest.estimatedTotalDurationSeconds}s (~${Math.round(manifest.estimatedTotalDurationSeconds / 60)} minutes)`);
-          console.log(`  Target Runtime: ${manifest.targetMinutes} minutes`);
-          console.log(`  Files saved: script/script.md and script/narration.json`);
-          console.log(`  Next step: video-studio script validate --project ${options.project}`);
+  cmd
+    .command("import")
+    .description("Import the script Markdown")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .requiredOption("-i, --input <file>", "Script Markdown file")
+    .option("--force", "Import without approved research")
+    .action(
+      guarded(program, async (o) => {
+        const { manifest, validation } = await sm.importScript(o.project, o.input, { force: o.force });
+        printOutput(validation, json(), () => {
+          if (validation.valid) ok(`Script imported: ${manifest.totalWordCount} words, ${validation.segmentCount} segments.`);
+          else bad("Script imported with errors.");
+          printIssues(validation);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+        if (!validation.valid) process.exitCode = 1;
+      })
+    );
 
-  scriptCmd
-    .command("validate")
-    .description("Validate script integrity and claim references")
+  cmd
+    .command("set-segment")
+    .description("Change one narration segment without touching the rest")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const report = await sm.validateScript(options.project);
+    .requiredOption("-s, --segment <id>", "Segment ID")
+    .option("-t, --text <text>", "New narration text")
+    .option("--claims <ids>", "Comma-separated claim IDs")
+    .action(
+      guarded(program, async (o) => {
+        const segment = await sm.setSegment(o.project, o.segment, {
+          text: o.text,
+          claimIds: o.claims?.split(",").map((c: string) => c.trim()),
+        });
+        printOutput(segment, json(), () => ok(`Updated ${segment.segment_id}.`));
+      })
+    );
 
-        printOutput(report, globalOpts.json, () => {
+  cmd
+    .command("validate")
+    .description("Check word count and claim support")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(
+      guarded(program, async (o) => {
+        const report = await sm.validateScript(o.project);
+        printOutput(report, json(), () => {
           if (report.valid) {
-            console.log(`\x1b[32m✔\x1b[0m Script validation passed!`);
-            console.log(`  Chapters: ${report.chapterCount} | Segments: ${report.segmentCount}`);
-            console.log(`  Word Count: ${report.totalWords} words (~${report.estimatedDurationSeconds}s)`);
-            if (report.warnings.length > 0) {
-              for (const w of report.warnings) console.log(`  ⚠ ${w}`);
-            }
-            console.log(`  Next step: video-studio script approve --project ${options.project}`);
+            ok(`Script is valid: ${report.totalWords} words, about ${Math.round(report.estimatedDurationSeconds / 60)} min.`);
           } else {
-            console.log(`\x1b[31m✖\x1b[0m Script validation failed:`);
-            for (const e of report.errors) console.log(`  - ${e}`);
+            bad("Script failed validation.");
           }
+          printIssues(report);
         });
         if (!report.valid) process.exitCode = 1;
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  scriptCmd
+  cmd
     .command("approve")
-    .description("Approve script and advance to storyboard stage")
+    .description("Approve the script")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await sm.approveScript(options.project);
-
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Script approved for project "${options.project}"`);
-          console.log(`  Next step: video-studio storyboard generate --project ${options.project}`);
+    .action(
+      guarded(program, async (o) => {
+        await sm.approveScript(o.project);
+        printOutput({ approved: true }, json(), () => {
+          ok("Script approved.");
+          console.log(`  Next: video-studio storyboard brief --project ${o.project}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  scriptCmd
+  cmd
     .command("show")
-    .description("Display script text and chapter breakdowns")
+    .description("Print the script, or one segment with its claims")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const md = await sm.getScriptMarkdown(options.project);
-        printOutput(md, globalOpts.json, () => console.log(md));
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+    .option("-s, --segment <id>", "Segment ID")
+    .action(
+      guarded(program, async (o) => {
+        if (o.segment) {
+          console.log(JSON.stringify(await sm.inspectSegment(o.project, o.segment), null, 2));
+          return;
+        }
+        console.log(await sm.getScriptMarkdown(o.project));
+      })
+    );
 
-  scriptCmd
+  cmd
     .command("export")
-    .description("Export script markdown file path for external editing")
+    .description("Write the script Markdown to a file")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const mdPath = sm.getMarkdownPath(options.project);
-        printOutput({ path: mdPath }, globalOpts.json, () => {
-          console.log(`Script Markdown path: ${mdPath}`);
-          console.log(`Edit in your preferred editor, then run: video-studio script validate --project ${options.project}`);
-        });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+    .requiredOption("-o, --output <file>", "Output file")
+    .action(
+      guarded(program, async (o) => {
+        await fs.writeFile(o.output, await sm.getScriptMarkdown(o.project), "utf-8");
+        printOutput({ output: o.output }, json(), () => ok(`Wrote ${o.output}.`));
+      })
+    );
 }
-

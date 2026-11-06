@@ -32,3 +32,29 @@ export function printError(err: any, isJson = false): void {
   }
 }
 
+
+/** Wraps a command so failures print cleanly and set the exit code. */
+export function guarded<T extends unknown[]>(program: { opts(): any }, action: (...args: T) => Promise<void>) {
+  return async (...args: T): Promise<void> => {
+    try {
+      await action(...args);
+    } catch (err: any) {
+      printError(err, program.opts().json);
+      process.exitCode = 1;
+    }
+  };
+}
+
+export function ok(message: string): void {
+  console.log(`\x1b[32m✔\x1b[0m ${message}`);
+}
+
+export function bad(message: string): void {
+  console.log(`\x1b[31m✖\x1b[0m ${message}`);
+}
+
+/** Prints problems only, so a check costs little to read. */
+export function printIssues(report: { errors: string[]; warnings: string[] }): void {
+  for (const e of report.errors) console.log(`  error: ${e}`);
+  for (const w of report.warnings) console.log(`  warn:  ${w}`);
+}

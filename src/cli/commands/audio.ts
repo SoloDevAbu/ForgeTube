@@ -1,206 +1,243 @@
 import { Command } from "commander";
 import { AudioManager } from "../../core/audio/audioManager.js";
+import { VoiceManager } from "../../core/audio/voiceManager.js";
+import { MusicLibrary } from "../../core/audio/musicLibrary.js";
+import { AudioMixer } from "../../core/audio/mixer.js";
+import { StoryboardManager } from "../../core/storyboard/storyboardManager.js";
 import { TimelineCompiler } from "../../core/timeline/timelineCompiler.js";
-import { printOutput, printError } from "../output.js";
+import { bad, guarded, ok, printIssues, printOutput } from "../output.js";
 
-export function registerAudioCommands(program: Command, audioMgr: AudioManager): void {
-  const audioCmd = program.command("audio").description("Audio asset import and mixing");
+export interface AudioCommandDeps {
+  audio: AudioManager;
+  voice: VoiceManager;
+  music: MusicLibrary;
+  mixer: AudioMixer;
+  storyboard: StoryboardManager;
+}
 
-  audioCmd
+export function registerAudioCommands(program: Command, deps: AudioCommandDeps): void {
+  const { audio, voice, music, mixer, storyboard } = deps;
+  const cmd = program.command("audio").description("Voice, sound effects, music and the final mix");
+  const json = () => Boolean(program.opts().json);
+
+  cmd
+    .command("voice")
+    .description("Voice the narration. Only changed segments are generated")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .option("-s, --segment <id>", "Only this segment")
+    .option("--regenerate", "Make a new take even if the text is unchanged")
+    .option("--force", "Run without an approved script")
+    .action(
+      guarded(program, async (o) => {
+        const result = await voice.generate(o.project, {
+          segmentId: o.segment,
+          regenerate: o.regenerate,
+          force: o.force,
+          onProgress: (done, total) => {
+            if (!json()) process.stdout.write(`\rVoicing ${done}/${total}`);
+          },
+        });
+        if (!json()) console.log();
+        printOutput(result, json(), () => {
+          const minutes = (result.totalSeconds / 60).toFixed(1);
+          ok(`${result.generated.length} voiced, ${result.reused.length} reused, ${minutes} min in total.`);
+          for (const f of result.failed) console.log(`  error: ${f.segmentId}: ${f.message}`);
+          console.log(`  Next: video-studio timeline compile --project ${o.project}`);
+        });
+        if (result.failed.length > 0) process.exitCode = 1;
+      })
+    );
+
+  cmd
     .command("import")
-    .description("Import narration voiceover audio files and measure durations with ffprobe")
+    .description("Use your own recording for a narration segment")
     .requiredOption("-p, --project <id>", "Project ID")
-    .requiredOption("-i, --input <path>", "File path or directory containing voice files")
-    .option("-s, --scene <sceneId>", "Scene ID (if importing a single file)")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const res = await audioMgr.importVoiceAudio(options.project, {
-          inputPath: options.input,
-          sceneId: options.scene,
-        });
+    .requiredOption("-i, --input <file>", "Audio file")
+    .requiredOption("-s, --segment <id>", "Segment ID")
+    .action(
+      guarded(program, async (o) => {
+        const result = await voice.importRecording(o.project, o.input, o.segment);
+        printOutput(result, json(), () => ok(`${result.segmentId}: ${result.durationSeconds.toFixed(2)} s.`));
+      })
+    );
 
-        printOutput(res, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Successfully imported ${res.importedCount} voice track(s):`);
-          for (const t of res.importedTracks) {
-            console.log(`  • ${t.sceneId}: ${t.file} (measured duration: ${t.durationSeconds.toFixed(2)}s)`);
+  const sfx = cmd.command("sfx").description("Sound effects");
+  sfx
+    .command("render")
+    .alias("plan")
+    .description("Render the storyboard's sfx= suggestions with earshot")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(
+      guarded(program, async (o) => {
+        const result = await audio.renderPlannedSfx(o.project);
+        printOutput(result, json(), () => {
+          ok(`${result.planned} placed: ${result.rendered.length} sounds rendered, ${result.reused.length} reused.`);
+          for (const f of result.failed) console.log(`  error: ${f.soundId}: ${f.message}`);
+        });
+        if (result.failed.length > 0) process.exitCode = 1;
+      })
+    );
+  sfx
+    .command("add")
+    .description("Add your own sound effect")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .requiredOption("-i, --input <file>", "Audio file")
+    .option("-s, --scene <id>", "Scene ID")
+    .option("--offset <seconds>", "Seconds after the scene starts", parseFloat, 0)
+    .option("--volume <volume>", "Volume from 0 to 1", parseFloat, 0.5)
+    .action(
+      guarded(program, async (o) => {
+        const event = await audio.addSoundEffect(o.project, {
+          inputPath: o.input,
+          sceneId: o.scene,
+          offsetSeconds: o.offset,
+          volume: o.volume,
+        });
+        printOutput(event, json(), () => ok(`Added ${event.eventId}.`));
+      })
+    );
+
+  const musicCmd = cmd.command("music").description("Background sound from the music folder");
+  musicCmd
+    .command("scan")
+    .description("Read new files in the music folder")
+    .action(
+      guarded(program, async () => {
+        const result = await music.scan();
+        printOutput(result, json(), () => {
+          ok(`${result.tracks.length} tracks: ${result.scanned.length} new, ${result.skipped} already scanned.`);
+          for (const t of result.tracks) {
+            console.log(`  ${t.kind.padEnd(8)} ${t.lufs.toFixed(1)} LUFS  ${t.durationSeconds.toFixed(0)} s  ${t.file}`);
           }
-          console.log(`  Next step: video-studio timeline compile --project ${options.project}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
-
-  audioCmd
-    .command("sfx")
-    .description("Import and configure a sound effect")
+      })
+    );
+  musicCmd
+    .command("plan")
+    .description("Pick a track for each chapter from its mood")
     .requiredOption("-p, --project <id>", "Project ID")
-    .requiredOption("-i, --input <file>", "Path to sound effect audio file")
-    .option("-s, --scene <sceneId>", "Scene association")
-    .option("-o, --offset <seconds>", "Time offset in seconds", (v) => parseFloat(v), 0)
-    .option("-v, --volume <volume>", "Volume level 0.0 to 1.0", (v) => parseFloat(v), 0.5)
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const sfx = await audioMgr.importSoundEffect(options.project, {
-          inputPath: options.input,
-          sceneId: options.scene,
-          offsetSeconds: options.offset,
-          volume: options.volume,
+    .action(
+      guarded(program, async (o) => {
+        const plan = await music.plan(o.project, await storyboard.getStoryboard(o.project));
+        printOutput(plan, json(), () => {
+          ok("Music planned.");
+          for (const e of plan.entries) console.log(`  ${e.chapterId}  ${e.kind}  ${e.file}  (${e.mood})`);
         });
-
-        printOutput(sfx, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Sound effect added: ${sfx.file} (vol: ${sfx.volume}, offset: ${sfx.startSeconds}s)`);
-        });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
-
-  audioCmd
-    .command("music")
-    .description("Import and configure background music bed with ducking")
+      })
+    );
+  musicCmd
+    .command("set")
+    .description("Choose a chapter's track yourself")
     .requiredOption("-p, --project <id>", "Project ID")
-    .requiredOption("-i, --input <file>", "Path to music audio file")
-    .option("-v, --volume <volume>", "Base volume level 0.0 to 1.0", (v) => parseFloat(v), 0.2)
-    .option("--no-ducking", "Disable automatic ducking under narration")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const bed = await audioMgr.importMusicBed(options.project, {
-          inputPath: options.input,
-          volume: options.volume,
-          ducking: options.ducking !== false,
-        });
+    .requiredOption("-c, --chapter <id>", "Chapter ID")
+    .requiredOption("-t, --track <file>", "Track path inside the music folder")
+    .action(
+      guarded(program, async (o) => {
+        const plan = await music.setTrack(o.project, o.chapter, o.track);
+        printOutput(plan, json(), () => ok(`${o.chapter} now uses ${o.track}.`));
+      })
+    );
 
-        printOutput(bed, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Background music bed added: ${bed.file} (vol: ${bed.volume}, ducking: ${bed.ducking.enabled})`);
+  cmd
+    .command("mix")
+    .description("Mix voice, music and effects into editing/mix.wav")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .option("--force", "Mix again even if nothing changed")
+    .action(
+      guarded(program, async (o) => {
+        const r = await mixer.mix(o.project, { force: o.force });
+        printOutput(r, json(), () => {
+          const state = r.reused ? "Mix is up to date" : "Mixed";
+          const music = r.hasMusic ? "with" : "no";
+          ok(`${state}: ${r.lufs.toFixed(1)} LUFS, ${r.truePeakDb.toFixed(1)} dBTP, ${music} music, ${r.soundEffects} effects.`);
+          console.log(`  Next: video-studio audio approve --project ${o.project}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  audioCmd
+  cmd
+    .command("approve")
+    .description("Approve the mix")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(
+      guarded(program, async (o) => {
+        const record = await mixer.approve(o.project);
+        printOutput(record, json(), () => {
+          ok("Audio approved.");
+          console.log(`  Next: video-studio render --project ${o.project} --mode draft`);
+        });
+      })
+    );
+
+  cmd
     .command("inspect")
-    .description("Inspect configured audio tracks and mix events")
+    .description("Summarize audio tracks")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const mix = await audioMgr.getAudioMix(options.project);
-
-        printOutput(mix, globalOpts.json, () => {
-          console.log(`\n======================================================`);
-          console.log(` Audio Mix: ${options.project} (Master Volume: ${mix.masterVolume})`);
-          console.log(`======================================================\n`);
-          console.log(`VOICE TRACKS (${mix.voiceTracks.length}):`);
-          for (const vt of mix.voiceTracks) {
-            console.log(`  • ${vt.sceneId}: ${vt.file} (~${vt.durationSeconds.toFixed(2)}s, vol: ${vt.volume})`);
-          }
-          console.log(`\nSOUND EFFECTS (${mix.soundEffects.length}):`);
-          for (const sfx of mix.soundEffects) {
-            console.log(`  • ${sfx.eventId}: ${sfx.file} (offset: ${sfx.startSeconds}s, vol: ${sfx.volume})`);
-          }
-          console.log(`\nMUSIC BEDS (${mix.musicBeds.length}):`);
-          for (const mb of mix.musicBeds) {
-            console.log(`  • ${mb.trackId}: ${mb.file} (vol: ${mb.volume}, ducking: ${mb.ducking.enabled ? "on" : "off"})`);
-          }
-          console.log();
+    .action(
+      guarded(program, async (o) => {
+        const mix = await audio.getAudioMix(o.project);
+        const plan = await music.getPlan(o.project);
+        const record = await mixer.getRecord(o.project);
+        const seconds = mix.voiceTracks.reduce((sum, t) => sum + t.durationSeconds, 0);
+        printOutput({ mix, plan, record }, json(), () => {
+          console.log(`  Voice:   ${mix.voiceTracks.length} segments, ${(seconds / 60).toFixed(1)} min`);
+          console.log(`  Effects: ${mix.soundEffects.length}`);
+          console.log(`  Music:   ${plan.entries.length} chapter tracks`);
+          console.log(`  Mix:     ${record ? `${record.lufs.toFixed(1)} LUFS` : "not made"}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 }
 
 export function registerTimelineCommands(program: Command, tc: TimelineCompiler): void {
-  const timelineCmd = program.command("timeline").description("Deterministic frame-accurate timeline compilation");
+  const cmd = program.command("timeline").description("Frame-accurate timeline");
+  const json = () => Boolean(program.opts().json);
 
-  timelineCmd
+  cmd
     .command("compile")
-    .description("Compile editorial scenes and audio into a deterministic render manifest")
+    .description("Build the timeline from real voice durations")
     .requiredOption("-p, --project <id>", "Project ID")
-    .option("-m, --mode <mode>", "Render mode ('draft' or 'final')", "final")
-    .option("-b, --breathing-room <seconds>", "Hold padding after narration in seconds", (v) => parseFloat(v), 0.5)
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await tc.compileTimeline(options.project, {
-          mode: options.mode as any,
-          breathingRoomSeconds: options.breathingRoom,
+    .action(
+      guarded(program, async (o) => {
+        const manifest = await tc.compileTimeline(o.project);
+        const report = await tc.validateTimeline(o.project);
+        printOutput({ report }, json(), () => {
+          const minutes = (manifest.totalDurationSeconds / 60).toFixed(1);
+          ok(`${manifest.scenes.length} shots, ${manifest.totalDurationFrames} frames, ${minutes} min.`);
+          printIssues(report);
         });
+      })
+    );
 
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Timeline compiled successfully!`);
-          console.log(`  Scenes:               ${manifest.scenes.length}`);
-          console.log(`  Total Frames:         ${manifest.totalDurationFrames} frames`);
-          console.log(`  Total Duration:       ${manifest.totalDurationSeconds.toFixed(2)}s (~${(manifest.totalDurationSeconds / 60).toFixed(1)} mins)`);
-          console.log(`  Output Resolution:    ${manifest.width}x${manifest.height} @ ${manifest.fps} FPS`);
-          console.log(`  Saved Manifest:       render/render-manifest.json`);
-          console.log(`  Next step: video-studio render --project ${options.project} --mode draft`);
-        });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
-
-  timelineCmd
+  cmd
     .command("validate")
-    .description("Perform strict pre-render validation on compiled timeline and assets")
+    .description("Check the timeline before rendering")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const report = await tc.validateTimeline(options.project);
-
-        printOutput(report, globalOpts.json, () => {
-          if (report.valid) {
-            console.log(`\x1b[32m✔\x1b[0m Timeline validation passed! All assets, frames, and audio tracks are consistent.`);
-            console.log(`  Ready to render: video-studio render --project ${options.project} --mode final`);
-          } else {
-            console.log(`\x1b[31m✖\x1b[0m Timeline validation failed with ${report.errors.length} error(s):`);
-            for (const e of report.errors) console.log(`  - ${e}`);
-          }
+    .action(
+      guarded(program, async (o) => {
+        const report = await tc.validateTimeline(o.project);
+        printOutput(report, json(), () => {
+          if (report.valid) ok("Timeline is valid.");
+          else bad(`Timeline has ${report.errors.length} error(s).`);
+          printIssues(report);
         });
         if (!report.valid) process.exitCode = 1;
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  timelineCmd
+  cmd
     .command("inspect")
-    .description("Inspect scene frame bounds and transition overlaps")
+    .description("List shots with frame ranges")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await tc.getRenderManifest(options.project);
-
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\n======================================================`);
-          console.log(` Timeline: ${options.project} (${manifest.totalDurationFrames} frames / ${manifest.totalDurationSeconds}s)`);
-          console.log(`======================================================\n`);
+    .action(
+      guarded(program, async (o) => {
+        const manifest = await tc.getRenderManifest(o.project);
+        printOutput(manifest, json(), () => {
           for (const s of manifest.scenes) {
-            console.log(`  • [${s.sceneId}] "${s.title}"`);
-            console.log(`    Frames: [${s.startFrame} .. ${s.endFrame}] (duration: ${s.durationFrames} frames)`);
-            console.log(`    Transition: ${s.transition.type} (overlap: ${s.transition.overlapFrames} frames)`);
-            console.log(`    Camera: ${s.camera.effect} (intensity: ${s.camera.intensity})`);
+            const seconds = (s.durationFrames / manifest.fps).toFixed(2);
+            console.log(`  ${s.sceneId}  [${s.startFrame}..${s.endFrame}]  ${seconds} s  ${s.camera.effect}  ${s.transition.type}`);
           }
-          console.log();
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 }
-

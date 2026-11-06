@@ -1,144 +1,127 @@
 import { Command } from "commander";
 import { StoryboardManager } from "../../core/storyboard/storyboardManager.js";
-import { printOutput, printError } from "../output.js";
+import { TimelineCompiler } from "../../core/timeline/timelineCompiler.js";
+import { bad, guarded, ok, printIssues, printOutput } from "../output.js";
 
-export function registerStoryboardCommands(program: Command, stm: StoryboardManager): void {
-  const sbCmd = program.command("storyboard").description("Visual storyboard and scene planning");
+export function registerStoryboardCommands(program: Command, stm: StoryboardManager, tc: TimelineCompiler): void {
+  const cmd = program.command("storyboard").description("Shot list: written by Claude Code, checked here");
+  const json = () => Boolean(program.opts().json);
 
-  sbCmd
-    .command("generate")
-    .description("Plan visual scenes, camera motions, and Google Flow prompts from approved script")
+  cmd
+    .command("brief")
+    .description("Print the storyboard brief, for the whole film or one chapter")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await stm.generateStoryboard(options.project);
+    .option("-c, --chapter <id>", "Chapter ID")
+    .action(guarded(program, async (o) => console.log(await stm.buildBrief(o.project, o.chapter))));
 
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Storyboard generated successfully for "${options.project}"`);
-          console.log(`  Scenes Planned: ${manifest.scenes.length}`);
-          console.log(`  Google Flow Prompts: ${manifest.prompts.length}`);
-          console.log(`  Files created: storyboard/scenes.json and storyboard/image-prompts.json`);
-          console.log(`  Next step: video-studio storyboard validate --project ${options.project}`);
+  cmd
+    .command("import")
+    .description("Import the shot list. Existing shots keep their images and crops")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .requiredOption("-i, --input <file>", "Storyboard file")
+    .option("--force", "Import without an approved script")
+    .action(
+      guarded(program, async (o) => {
+        const result = await stm.importStoryboard(o.project, o.input, { force: o.force });
+        printOutput(result, json(), () => {
+          ok(`${result.storyboard.scenes.length} shots: ${result.added} new, ${result.kept} kept, ${result.removed} removed.`);
+          for (const w of result.warnings) console.log(`  warn:  ${w}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  sbCmd
-    .command("validate")
-    .description("Validate storyboard scenes, transitions, and prompts")
+  cmd
+    .command("rebalance")
+    .description("Move word boundaries so shots fit the time limits, using real voice timing")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const report = await stm.validateStoryboard(options.project);
-
-        printOutput(report, globalOpts.json, () => {
-          if (report.valid) {
-            console.log(`\x1b[32m✔\x1b[0m Storyboard validation passed!`);
-            console.log(`  Total Scenes: ${report.sceneCount}`);
-            console.log(`  Total Prompts: ${report.promptCount}`);
-            console.log(`  Estimated Total Visual Duration: ${report.totalSuggestedDurationSeconds}s`);
-            console.log(`  Next step: video-studio storyboard approve --project ${options.project}`);
-          } else {
-            console.log(`\x1b[31m✖\x1b[0m Storyboard validation failed:`);
-            for (const e of report.errors) console.log(`  - ${e}`);
+    .action(
+      guarded(program, async (o) => {
+        const result = await stm.rebalance(o.project, tc);
+        printOutput(result, json(), () => {
+          ok(`Moved ${result.moves.length} shot boundaries.`);
+          for (const u of result.unresolved) {
+            console.log(`  needs image: ${u.sceneId} (${u.seconds.toFixed(1)} s). ${u.suggestion}`);
           }
+        });
+        if (result.unresolved.length > 0) process.exitCode = 1;
+      })
+    );
+
+  cmd
+    .command("validate")
+    .description("Check shots, prompts and time limits")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(
+      guarded(program, async (o) => {
+        const report = await stm.validateStoryboard(o.project);
+        printOutput(report, json(), () => {
+          if (report.valid) ok(`Storyboard is valid: ${report.sceneCount} shots.`);
+          else bad("Storyboard failed validation.");
+          printIssues(report);
         });
         if (!report.valid) process.exitCode = 1;
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  sbCmd
+  cmd
     .command("approve")
-    .description("Approve storyboard and proceed to prompt export")
+    .description("Approve the storyboard")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await stm.approveStoryboard(options.project);
-
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Storyboard approved for project "${options.project}"`);
-          console.log(`  Next step: video-studio prompts export --project ${options.project}`);
+    .action(
+      guarded(program, async (o) => {
+        await stm.approveStoryboard(o.project);
+        printOutput({ approved: true }, json(), () => {
+          ok("Storyboard approved.");
+          console.log(`  Next: video-studio prompts export --project ${o.project}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  sbCmd
+  cmd
     .command("show")
-    .description("Display planned scenes and camera effects")
+    .description("List shots, or show one in full")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const manifest = await stm.getStoryboard(options.project);
-
-        printOutput(manifest, globalOpts.json, () => {
-          console.log(`\n======================================================`);
-          console.log(` Storyboard Scenes: ${options.project} (${manifest.scenes.length} scenes)`);
-          console.log(`======================================================\n`);
-          for (const s of manifest.scenes) {
-            console.log(`  • [${s.sceneId}] "${s.title}" (~${s.suggestedDurationSeconds}s)`);
-            console.log(`    Camera: ${s.camera.effect} (intensity: ${s.camera.intensity}) | Transition: ${s.transition.type}`);
-            console.log(`    Visual Purpose: ${s.visualPurpose}`);
-            console.log(`    Target Image: ${s.visual.image} (Status: ${s.status.image})`);
+    .option("-s, --scene <id>", "Scene ID")
+    .action(
+      guarded(program, async (o) => {
+        const storyboard = await stm.getStoryboard(o.project);
+        if (o.scene) {
+          console.log(JSON.stringify(storyboard.scenes.find((s) => s.sceneId === o.scene) ?? null, null, 2));
+          return;
+        }
+        printOutput(storyboard, json(), () => {
+          for (const s of storyboard.scenes) {
+            console.log(`  ${s.sceneId}  ${s.camera.effect}  ${s.shortPrompt}`);
           }
-          console.log();
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 }
 
 export function registerPromptsCommands(program: Command, stm: StoryboardManager): void {
-  const promptsCmd = program.command("prompts").description("Google Flow image-generation prompts");
+  const cmd = program.command("prompts").description("Google Flow image prompts");
 
-  promptsCmd
+  cmd
     .command("export")
-    .description("Export Google Flow prompts and trigger the WAITING_FOR_MANUAL_IMAGES checkpoint")
+    .description("Write prompt batches of 10 for Google Flow")
     .requiredOption("-p, --project <id>", "Project ID")
-    .option("-f, --format <format>", "Export format: 'markdown' or 'json'", "markdown")
-    .option("-c, --chapter <chapterId>", "Filter prompts by chapter ID")
-    .option("-s, --scene <sceneId>", "Export prompt for a single scene ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const res = await stm.exportPrompts(options.project, {
-          format: options.format as any,
-          chapterId: options.chapter,
-          sceneId: options.scene,
+    .option("-c, --chapter <id>", "Only this chapter, in a separate file")
+    .option("-s, --scene <id>", "Only this scene, in a separate file")
+    .option("-f, --format <format>", "markdown or json", "markdown")
+    .option("--force", "Export without an approved storyboard")
+    .action(
+      guarded(program, async (o) => {
+        const result = await stm.exportPrompts(o.project, {
+          format: o.format,
+          chapterId: o.chapter,
+          sceneId: o.scene,
+          force: o.force,
         });
-
-        printOutput(res, globalOpts.json, () => {
-          console.log(`\n\x1b[33m======================================================\x1b[0m`);
-          console.log(`  \x1b[1mMANUAL CHECKPOINT: GOOGLE FLOW IMAGE GENERATION\x1b[0m`);
-          console.log(`\x1b[33m======================================================\x1b[0m`);
-          console.log(` Exported ${res.promptCount} prompt(s) to:`);
-          console.log(`   \x1b[36m${res.exportPath}\x1b[0m\n`);
-          console.log(` INSTRUCTIONS:`);
-          console.log(` 1. Open Google Flow in your browser.`);
-          console.log(` 2. Paste each prompt with aspect ratio set to \x1b[1m16:9\x1b[0m.`);
-          console.log(` 3. Download the generated images and name them as indicated (e.g. scene_001.png).`);
-          console.log(` 4. When ready, import the images into ForgeTube:`);
-          console.log(`    \x1b[32mvideo-studio assets import --project ${options.project} --input ./generated-images/\x1b[0m`);
-          console.log(`\x1b[33m======================================================\x1b[0m\n`);
+        printOutput(result, program.opts().json, () => {
+          ok(`${result.promptCount} prompts in ${Math.max(result.batchPaths.length, 1)} file(s): ${result.exportPath}`);
+          console.log(`  Next: generate images in Google Flow, then`);
+          console.log(`  video-studio assets import --project ${o.project} --input <dir> --order`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 }
-

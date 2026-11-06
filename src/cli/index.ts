@@ -6,6 +6,10 @@ import { StoryboardManager } from "../core/storyboard/storyboardManager.js";
 import { AssetManager } from "../core/assets/assetManager.js";
 import { CalibrationManager } from "../core/calibration/calibrationManager.js";
 import { AudioManager } from "../core/audio/audioManager.js";
+import { VoiceManager } from "../core/audio/voiceManager.js";
+import { MusicLibrary } from "../core/audio/musicLibrary.js";
+import { AudioMixer } from "../core/audio/mixer.js";
+import { StageGraph } from "../core/pipeline/stageGraph.js";
 import { TimelineCompiler } from "../core/timeline/timelineCompiler.js";
 import { RenderService } from "../core/render/renderService.js";
 import { JobManager } from "../core/jobs/jobManager.js";
@@ -17,6 +21,8 @@ import { registerStoryboardCommands, registerPromptsCommands } from "./commands/
 import { registerAssetCommands, registerCalibrationCommands } from "./commands/assets.js";
 import { registerAudioCommands, registerTimelineCommands } from "./commands/audio.js";
 import { registerRenderCommands, registerJobCommands } from "./commands/render.js";
+import { registerDoctorCommand } from "./commands/doctor.js";
+import { registerPipelineCommands } from "./commands/pipeline.js";
 
 export function createCliProgram(): Command {
   const program = new Command();
@@ -37,20 +43,25 @@ export function createCliProgram(): Command {
   const audioMgr = new AudioManager(pm);
   const tc = new TimelineCompiler(pm, audioMgr);
   const jm = new JobManager();
-  const rs = new RenderService(pm, tc, jm);
+  const music = new MusicLibrary(pm);
+  const mixer = new AudioMixer(pm, tc, music);
+  const voice = new VoiceManager(pm, sm, audioMgr);
+  const rs = new RenderService(pm, tc, jm, mixer);
 
   // Register command suites
   registerProjectCommands(program, pm);
   registerResearchCommands(program, rm);
   registerScriptCommands(program, sm);
-  registerStoryboardCommands(program, stm);
+  registerStoryboardCommands(program, stm, tc);
   registerPromptsCommands(program, stm);
   registerAssetCommands(program, am);
   registerCalibrationCommands(program, cm);
-  registerAudioCommands(program, audioMgr);
+  registerAudioCommands(program, { audio: audioMgr, voice, music, mixer, storyboard: stm });
   registerTimelineCommands(program, tc);
   registerRenderCommands(program, rs);
   registerJobCommands(program, jm);
+  registerDoctorCommand(program);
+  registerPipelineCommands(program, new StageGraph(pm));
 
   return program;
 }
@@ -61,7 +72,7 @@ export async function runCli(argv = process.argv): Promise<void> {
 }
 
 // Execute directly if invoked from command line
-if (import.meta.main || process.argv[1]?.endsWith("index.ts") || process.argv[1]?.endsWith("video-studio.js")) {
+if (import.meta.main) {
   runCli().catch((err) => {
     console.error(`Unexpected CLI failure:`, err);
     process.exit(1);

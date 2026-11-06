@@ -1,138 +1,76 @@
 import { Command } from "commander";
 import { ResearchManager } from "../../core/research/researchManager.js";
-import { printOutput, printError } from "../output.js";
+import { bad, guarded, ok, printIssues, printOutput } from "../output.js";
 
 export function registerResearchCommands(program: Command, rm: ResearchManager): void {
-  const researchCmd = program.command("research").description("Historical research and claim management");
+  const cmd = program.command("research").description("Research dossier: written by Claude Code, checked here");
+  const json = () => Boolean(program.opts().json);
 
-  researchCmd
-    .command("run")
-    .description("Execute verifiable historical research for the project topic")
+  cmd
+    .command("brief")
+    .description("Print the research brief for the author")
     .requiredOption("-p, --project <id>", "Project ID")
-    .option("--template", "Force generation of scholarly template without external CLI tool", false)
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const dossier = await rm.runResearch(options.project, { forceTemplate: options.template });
+    .action(guarded(program, async (o) => console.log(await rm.buildBrief(o.project))));
 
-        printOutput(dossier, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Research completed for project "${options.project}"`);
-          console.log(`  Topic: ${dossier.topic}`);
-          console.log(`  Sources: ${dossier.sources.length} cited`);
-          console.log(`  Claims: ${dossier.claims.length} verified/referenced`);
-          console.log(`  Chronology: ${dossier.chronology.length} chronological events`);
-          console.log(`  Chapters Planned: ${dossier.chapters.length}`);
-          console.log(`  Next step: video-studio research validate --project ${options.project}`);
-        });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
-
-  researchCmd
-    .command("validate")
-    .description("Validate research claims against cited source evidence")
+  cmd
+    .command("import")
+    .description("Import a research dossier JSON file")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const report = await rm.validateResearch(options.project);
-
-        printOutput(report, globalOpts.json, () => {
-          if (report.valid) {
-            console.log(`\x1b[32m✔\x1b[0m Research validation passed!`);
-            console.log(`  Verified Sources: ${report.totalSources}`);
-            console.log(`  Verified Claims:  ${report.totalClaims}`);
-            console.log(`  Verified Events:  ${report.totalEvents}`);
-            if (report.warnings.length > 0) {
-              console.log(`  Warnings:`);
-              for (const w of report.warnings) console.log(`    ⚠ ${w}`);
-            }
-            console.log(`  Next step: video-studio research approve --project ${options.project}`);
-          } else {
-            console.log(`\x1b[31m✖\x1b[0m Research validation failed with ${report.errors.length} error(s):`);
-            for (const e of report.errors) console.log(`  - ${e}`);
-          }
+    .requiredOption("-i, --input <file>", "Dossier JSON file")
+    .action(
+      guarded(program, async (o) => {
+        const dossier = await rm.importResearch(o.project, o.input);
+        const report = await rm.validateResearch(o.project);
+        printOutput({ report }, json(), () => {
+          ok(`Imported ${dossier.sources.length} sources and ${dossier.claims.length} claims.`);
+          printIssues(report);
         });
         if (!report.valid) process.exitCode = 1;
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  researchCmd
+  cmd
+    .command("validate")
+    .description("Check claims against their sources")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(
+      guarded(program, async (o) => {
+        const report = await rm.validateResearch(o.project);
+        printOutput(report, json(), () => {
+          if (report.valid) ok(`Research is valid: ${report.totalSources} sources, ${report.totalClaims} claims.`);
+          else bad("Research failed validation.");
+          printIssues(report);
+        });
+        if (!report.valid) process.exitCode = 1;
+      })
+    );
+
+  cmd
     .command("approve")
-    .description("Approve research dossier and advance workflow")
+    .description("Approve research")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const dossier = await rm.approveResearch(options.project);
-
-        printOutput(dossier, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Research dossier approved for project "${options.project}"`);
-          console.log(`  Next step: video-studio script generate --project ${options.project}`);
+    .action(
+      guarded(program, async (o) => {
+        await rm.approveResearch(o.project);
+        printOutput({ approved: true }, json(), () => {
+          ok("Research approved.");
+          console.log(`  Next: video-studio script brief --project ${o.project}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 
-  researchCmd
+  cmd
     .command("show")
-    .description("Display research claims, sources, and chronology")
+    .description("Show claims and sources")
     .requiredOption("-p, --project <id>", "Project ID")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const dossier = await rm.getResearch(options.project);
-
-        printOutput(dossier, globalOpts.json, () => {
-          console.log(`\n======================================================`);
-          console.log(` Historical Research: ${dossier.topic}`);
-          console.log(` Scope: ${dossier.scope_statement}`);
-          console.log(`======================================================\n`);
-          console.log(`SOURCES (${dossier.sources.length}):`);
-          for (const s of dossier.sources) {
-            console.log(`  [${s.source_id}] ${s.title}`);
-            console.log(`    Publisher: ${s.publisher} | Type: ${s.source_type}`);
-            console.log(`    URL: ${s.url}`);
-          }
-          console.log(`\nKEY CLAIMS (${dossier.claims.length}):`);
-          for (const c of dossier.claims) {
-            console.log(`  [${c.claim_id}] (${c.confidence} confidence, ${c.status})`);
-            console.log(`    "${c.claim}"`);
-            console.log(`    Evidence Sources: ${c.evidence_source_ids.join(", ")}`);
-            if (c.caveat) console.log(`    Caveat: ${c.caveat}`);
-          }
-          console.log();
+    .action(
+      guarded(program, async (o) => {
+        const dossier = await rm.getResearch(o.project);
+        printOutput(dossier, json(), () => {
+          console.log(`Topic: ${dossier.topic}`);
+          for (const s of dossier.sources) console.log(`  ${s.source_id}  ${s.title}`);
+          for (const c of dossier.claims) console.log(`  ${c.claim_id}  [${c.confidence}] ${c.claim}`);
         });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
-
-  researchCmd
-    .command("import")
-    .description("Import an externally prepared research dossier JSON file")
-    .requiredOption("-p, --project <id>", "Project ID")
-    .requiredOption("-i, --input <file>", "Path to JSON research file")
-    .action(async (options) => {
-      try {
-        const globalOpts = program.opts();
-        const dossier = await rm.importResearch(options.project, options.input);
-
-        printOutput(dossier, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Research imported successfully: ${dossier.claims.length} claims, ${dossier.sources.length} sources`);
-        });
-      } catch (err: any) {
-        printError(err, program.opts().json);
-        process.exitCode = 1;
-      }
-    });
+      })
+    );
 }
-

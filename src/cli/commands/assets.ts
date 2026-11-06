@@ -12,20 +12,25 @@ export function registerAssetCommands(program: Command, am: AssetManager): void 
     .requiredOption("-p, --project <id>", "Project ID")
     .requiredOption("-i, --input <path>", "File path or directory to import")
     .option("-s, --scene <sceneId>", "Explicit scene ID to map to")
+    .option("--order", "Match files to scenes in file-time order, for Google Flow's default names")
+    .option("--first-scene <sceneId>", "First scene when using --order")
     .action(async (options) => {
       try {
         const globalOpts = program.opts();
         const res = await am.importImages(options.project, {
           inputPath: options.input,
           sceneId: options.scene,
+          order: options.order,
+          firstScene: options.firstScene,
         });
 
         printOutput(res, globalOpts.json, () => {
-          console.log(`\x1b[32m✔\x1b[0m Successfully imported ${res.importedCount} image asset(s):`);
-          for (const a of res.importedAssets) {
-            console.log(`  • ${a.originalFilename} -> ${a.relativePath} (${a.width}x${a.height}, ${(a.fileSizeBytes / 1024).toFixed(1)} KB)`);
+          console.log(`\x1b[32m✔\x1b[0m Imported ${res.importedCount} image(s).`);
+          for (const row of res.rows.filter((r) => r.result !== "imported" || r.note)) {
+            console.log(`  ${row.result}: ${row.file} ${row.sceneId ?? ""} ${row.note}`);
           }
-          console.log(`  Next step: video-studio assets validate --project ${options.project}`);
+          console.log(`  Scenes still missing an image: ${res.missingScenes.length}`);
+          console.log(`  Next step: video-studio calibration apply-preset --project ${options.project} --preset gemini-watermark`);
         });
       } catch (err: any) {
         printError(err, program.opts().json);
@@ -45,7 +50,7 @@ export function registerAssetCommands(program: Command, am: AssetManager): void 
         printOutput(report, globalOpts.json, () => {
           if (report.valid) {
             console.log(`\x1b[32m✔\x1b[0m Asset validation passed! All ${report.totalScenes} scene images are present and verified.`);
-            console.log(`  Next step: video-studio calibration preview --project ${options.project} --scene scene_001`);
+            console.log(`  Next step: video-studio calibration apply-preset --project ${options.project} --preset gemini-watermark`);
           } else {
             console.log(`\x1b[31m✖\x1b[0m Missing image assets for ${report.missingScenes.length} scene(s):`);
             for (const s of report.missingScenes) console.log(`  - Scene: ${s}`);
@@ -88,22 +93,24 @@ export function registerCalibrationCommands(program: Command, cm: CalibrationMan
     .description("Set normalized crop coordinates and fit mode for a scene")
     .requiredOption("-p, --project <id>", "Project ID")
     .requiredOption("-s, --scene <sceneId>", "Scene ID (e.g. scene_001)")
-    .option("-f, --fit <mode>", "Fit mode: 'cover', 'contain', or 'manual'", "manual")
-    .option("-x, --x <x>", "Normalized X coordinate (0.0 to 1.0)", (v) => parseFloat(v))
-    .option("-y, --y <y>", "Normalized Y coordinate (0.0 to 1.0)", (v) => parseFloat(v))
-    .option("-w, --width <width>", "Normalized crop width (0.01 to 1.0)", (v) => parseFloat(v))
-    .option("-h, --height <height>", "Normalized crop height (0.01 to 1.0)", (v) => parseFloat(v))
-    .option("--scale <scale>", "Scale multiplier (default 1.0)", (v) => parseFloat(v), 1.0)
+    .option("-f, --fit <mode>", "Fit mode: 'cover', 'contain', or 'manual'", "cover")
+    .option("-x, --x <x>", "Horizontal focus, 0 = left, 1 = right", (v) => parseFloat(v))
+    .option("-y, --y <y>", "Vertical focus, 0 = top, 1 = bottom", (v) => parseFloat(v))
+    .option("-z, --zoom <zoom>", "Zoom, 1 or more", (v) => parseFloat(v))
+    .option("--crop <x,y,w,h>", "Exact normalized crop, which must be 16:9")
     .action(async (options) => {
       try {
         const globalOpts = program.opts();
+        const crop = options.crop?.split(",").map(Number) as number[] | undefined;
         const calib = await cm.setCalibration(options.project, options.scene, {
-          fit: options.fit as any,
-          x: options.x,
-          y: options.y,
-          width: options.width,
-          height: options.height,
-          scale: options.scale,
+          fit: crop ? "manual" : (options.fit as any),
+          x: crop?.[0],
+          y: crop?.[1],
+          width: crop?.[2],
+          height: crop?.[3],
+          posX: options.x,
+          posY: options.y,
+          scale: options.zoom,
         });
 
         printOutput(calib, globalOpts.json, () => {
@@ -113,6 +120,50 @@ export function registerCalibrationCommands(program: Command, cm: CalibrationMan
             console.log(`  Crop: x=${calib.crop.x}, y=${calib.crop.y}, width=${calib.crop.width}, height=${calib.crop.height}`);
           }
           console.log(`  Run to inspect: video-studio calibration preview --project ${options.project} --scene ${options.scene}`);
+        });
+      } catch (err: any) {
+        printError(err, program.opts().json);
+        process.exitCode = 1;
+      }
+    });
+
+  calibCmd
+    .command("apply-preset")
+    .description("Crop every image the same way. Hand-set crops are kept")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .requiredOption("--preset <name>", "Preset: gemini-watermark")
+    .option("-z, --zoom <zoom>", "Zoom, default 1.1", (v) => parseFloat(v))
+    .option("-x, --x <x>", "Horizontal focus", (v) => parseFloat(v))
+    .option("-y, --y <y>", "Vertical focus", (v) => parseFloat(v))
+    .option("--include-manual", "Also replace hand-set crops")
+    .action(async (options) => {
+      try {
+        const res = await cm.applyPreset(options.project, options.preset, {
+          zoom: options.zoom,
+          x: options.x,
+          y: options.y,
+          includeManual: options.includeManual,
+        });
+        printOutput(res, program.opts().json, () => {
+          console.log(`\x1b[32m✔\x1b[0m Applied to ${res.applied} scenes, skipped ${res.skipped.length}.`);
+          console.log(`  Next step: video-studio calibration contact-sheet --project ${options.project}`);
+        });
+      } catch (err: any) {
+        printError(err, program.opts().json);
+        process.exitCode = 1;
+      }
+    });
+
+  calibCmd
+    .command("contact-sheet")
+    .description("Make overview sheets of every crop for quick review")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .action(async (options) => {
+      try {
+        const res = await cm.generateContactSheets(options.project);
+        printOutput(res, program.opts().json, () => {
+          for (const s of res.sheets) console.log(`  ${s}`);
+          if (res.missing.length > 0) console.log(`  Missing images: ${res.missing.length}`);
         });
       } catch (err: any) {
         printError(err, program.opts().json);
@@ -194,7 +245,7 @@ export function registerCalibrationCommands(program: Command, cm: CalibrationMan
         await cm.approveCalibration(options.project);
         printOutput({ approved: true }, globalOpts.json, () => {
           console.log(`\x1b[32m✔\x1b[0m Calibration framing approved for project "${options.project}"!`);
-          console.log(`  Next step: video-studio audio import --project ${options.project} --input ./voice/`);
+          console.log(`  Next step: video-studio audio voice --project ${options.project}`);
         });
       } catch (err: any) {
         printError(err, program.opts().json);

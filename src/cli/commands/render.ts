@@ -8,11 +8,17 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
     .command("render")
     .description("Render scene preview, draft video, or final high-quality documentary video")
     .requiredOption("-p, --project <id>", "Project ID")
-    .option("-m, --mode <mode>", "Render mode ('scene', 'draft', or 'final')", "final")
+    .option("-m, --mode <mode>", "Render mode ('scene', 'draft', or 'final')", "draft")
     .option("-s, --scene <sceneId>", "Scene ID (required if mode is 'scene')")
+    .option("--force", "Skip approval checks")
     .action(async (options) => {
       try {
         const globalOpts = program.opts();
+        if (!["scene", "draft", "final"].includes(options.mode)) {
+          console.error(`Error: unknown mode "${options.mode}". Use scene, draft or final.`);
+          process.exitCode = 1;
+          return;
+        }
         if (options.mode === "scene" && !options.scene) {
           console.error("Error: --scene <sceneId> is required when rendering in 'scene' mode.");
           process.exitCode = 1;
@@ -25,6 +31,7 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
         const res = await rs.renderVideo(options.project, {
           mode: options.mode as any,
           sceneId: options.scene,
+          force: options.force,
           onProgress: (p) => {
             const pct = Math.floor(p * 100);
             if (pct !== lastReportedPct && pct % 10 === 0) {
@@ -41,6 +48,8 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
         printOutput(res, globalOpts.json, () => {
           console.log(`\n\x1b[32m✔\x1b[0m Video render completed and verified successfully!`);
           console.log(`  Output File:  \x1b[36m${res.outputPath}\x1b[0m`);
+          console.log(`  Chunks:       ${res.chunksRendered} rendered, ${res.chunksReused} reused`);
+          for (const w of res.warnings) console.log(`  warn: ${w}`);
           console.log(`  Resolution:   ${res.validation.width}x${res.validation.height}`);
           console.log(`  Duration:     ${res.validation.durationSeconds.toFixed(2)}s`);
           console.log(`  File Size:    ${(res.validation.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
@@ -75,7 +84,7 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
         } else {
           // Draft video render
           const res = await rs.renderVideo(options.project, {
-            mode: "draft",
+            mode: options.scene ? "scene" : "draft",
             sceneId: options.scene,
           });
           printOutput(res, globalOpts.json, () => {
