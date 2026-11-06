@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import crypto from "node:crypto";
 import { AssetError } from "../../shared/errors.js";
 
@@ -19,8 +20,9 @@ export interface MediaMetadata {
  * Computes SHA-256 checksum of a file.
  */
 export async function computeFileChecksum(filePath: string): Promise<string> {
-  const buffer = await fs.readFile(filePath);
-  return crypto.createHash("sha256").update(buffer).digest("hex");
+  const hash = crypto.createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 /**
