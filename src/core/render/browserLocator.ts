@@ -11,6 +11,7 @@ const CANDIDATE_WINDOWS_BROWSERS = [
  * Finds a suitable local browser executable for Remotion rendering.
  */
 export function getLocalBrowserExecutable(): string | undefined {
+  if (process.env.BROWSER_EXECUTABLE) return process.env.BROWSER_EXECUTABLE;
   for (const candidate of CANDIDATE_WINDOWS_BROWSERS) {
     if (existsSync(candidate)) {
       return candidate;

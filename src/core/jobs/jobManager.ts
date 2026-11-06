@@ -20,6 +20,8 @@ export interface JobRecord {
 export class JobManager {
   private pm: ProjectManager;
   private lastProgressWriteTime = 0;
+  /** Job file writes run one at a time, so a late progress write can't undo a result. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(pm?: ProjectManager) {
     this.pm = pm ?? new ProjectManager();
@@ -40,16 +42,50 @@ export class JobManager {
     }
   }
 
-  async recordJob(job: JobRecord): Promise<void> {
-    const p = this.getJobsFilePath(job.projectId);
-    const jobs = await this.getJobs(job.projectId);
-    const existingIdx = jobs.findIndex((j) => j.jobId === job.jobId);
-    if (existingIdx >= 0) {
-      jobs[existingIdx] = job;
-    } else {
-      jobs.push(job);
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.writes.then(work, work);
+    this.writes = next.catch(() => undefined);
+    return next;
+  }
+
+  private change(projectId: string, jobId: string, apply: (job: JobRecord) => void): Promise<void> {
+    return this.serialize(async () => {
+      const jobs = await this.getJobs(projectId);
+      const job = jobs.find((j) => j.jobId === jobId);
+      if (!job) return;
+      apply(job);
+      await atomicWriteJson(this.getJobsFilePath(projectId), { jobs });
+    });
+  }
+
+  recordJob(job: JobRecord): Promise<void> {
+    return this.serialize(async () => {
+      const jobs = await this.getJobs(job.projectId);
+      const existingIdx = jobs.findIndex((j) => j.jobId === job.jobId);
+      if (existingIdx >= 0) jobs[existingIdx] = job;
+      else jobs.push(job);
+      await atomicWriteJson(this.getJobsFilePath(job.projectId), { jobs });
+    });
+  }
+
+  /** A job left running by a crash can't still be running. Marks those failed. */
+  async recoverStaleJobs(projectId: string): Promise<number> {
+    const isAlive = (pid: unknown) => {
+      if (typeof pid !== "number") return false;
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const stale = (await this.getJobs(projectId)).filter(
+      (j) => j.status === "running" && !isAlive(j.metadata?.pid)
+    );
+    for (const job of stale) {
+      await this.failJob(projectId, job.jobId, "Interrupted before finishing.");
     }
-    await atomicWriteJson(p, { jobs });
+    return stale.length;
   }
 
   async updateJobProgress(
@@ -66,15 +102,11 @@ export class JobManager {
     this.lastProgressWriteTime = now;
 
     try {
-      const jobs = await this.getJobs(projectId);
-      const job = jobs.find((j) => j.jobId === jobId);
-      if (job) {
+      await this.change(projectId, jobId, (job) => {
+        if (job.status !== "running") return;
         job.progress = Math.min(1.0, Math.max(0, progress));
-        if (metadata) {
-          job.metadata = { ...job.metadata, ...metadata };
-        }
-        await atomicWriteJson(this.getJobsFilePath(projectId), { jobs });
-      }
+        if (metadata) job.metadata = { ...job.metadata, ...metadata };
+      });
     } catch {
       // Progress write error should not fail the render job
     }
@@ -86,16 +118,13 @@ export class JobManager {
     outputPath: string,
     metadata?: Record<string, unknown>
   ): Promise<void> {
-    const jobs = await this.getJobs(projectId);
-    const job = jobs.find((j) => j.jobId === jobId);
-    if (job) {
+    await this.change(projectId, jobId, (job) => {
       job.status = "completed";
       job.progress = 1.0;
       job.outputPath = outputPath;
       job.completedAt = new Date().toISOString();
       if (metadata) job.metadata = { ...job.metadata, ...metadata };
-      await atomicWriteJson(this.getJobsFilePath(projectId), { jobs });
-    }
+    });
   }
 
   async failJob(
@@ -104,14 +133,11 @@ export class JobManager {
     error: string,
     metadata?: Record<string, unknown>
   ): Promise<void> {
-    const jobs = await this.getJobs(projectId);
-    const job = jobs.find((j) => j.jobId === jobId);
-    if (job) {
+    await this.change(projectId, jobId, (job) => {
       job.status = "failed";
       job.error = error;
       job.completedAt = new Date().toISOString();
       if (metadata) job.metadata = { ...job.metadata, ...metadata };
-      await atomicWriteJson(this.getJobsFilePath(projectId), { jobs });
-    }
+    });
   }
 }
