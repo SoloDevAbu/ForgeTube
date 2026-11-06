@@ -4,63 +4,58 @@ import type { TransitionType } from "../../shared/types";
 
 export interface TransitionRendererProps {
   type: TransitionType;
-  overlapFrames: number;
+  /** Frames of the incoming transition. */
   durationFrames: number;
+  sceneDurationFrames: number;
+  /** Frames at the end of this scene that fade out to `fadeOutColor`. */
+  fadeOutFrames: number;
+  fadeOutColor: string;
   children: React.ReactNode;
 }
 
+const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
+
 export const TransitionRenderer: React.FC<TransitionRendererProps> = ({
   type,
-  overlapFrames,
   durationFrames,
+  sceneDurationFrames,
+  fadeOutFrames,
+  fadeOutColor,
   children,
 }) => {
   const frame = useCurrentFrame();
+  const fadesIn = durationFrames > 0 && (type === "fade_black" || type === "fade_white");
 
-  if (overlapFrames <= 0 || type === "cut") {
-    return <>{children}</>;
-  }
+  // The incoming scene dissolves over the previous one, which keeps playing underneath.
+  const opacity =
+    type === "cross_dissolve" && durationFrames > 0
+      ? interpolate(frame, [0, durationFrames], [0, 1], clamp)
+      : 1;
 
-  // Cross dissolve: incoming scene fades from opacity 0 to 1 over overlapFrames
-  if (type === "cross_dissolve") {
-    const opacity = interpolate(frame, [0, overlapFrames], [0, 1], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
+  const fadeInOverlay = fadesIn ? interpolate(frame, [0, durationFrames], [1, 0], clamp) : 0;
+  const fadeOutOverlay =
+    fadeOutFrames > 0
+      ? interpolate(frame, [sceneDurationFrames - fadeOutFrames, sceneDurationFrames - 1], [0, 1], clamp)
+      : 0;
 
-    return (
-      <div style={{ width: "100%", height: "100%", opacity, position: "relative" }}>
-        {children}
-      </div>
-    );
-  }
+  const overlay = (color: string, overlayOpacity: number) =>
+    overlayOpacity > 0 ? (
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: color,
+          opacity: overlayOpacity,
+          pointerEvents: "none",
+        }}
+      />
+    ) : null;
 
-  // Fade black / white: overlay that fades out
-  if (type === "fade_black" || type === "fade_white") {
-    const overlayColor = type === "fade_black" ? "#000000" : "#ffffff";
-    const overlayOpacity = interpolate(frame, [0, overlapFrames], [1, 0], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
-
-    return (
-      <div style={{ width: "100%", height: "100%", position: "relative" }}>
-        {children}
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            backgroundColor: overlayColor,
-            opacity: overlayOpacity,
-            pointerEvents: "none",
-          }}
-        />
-      </div>
-    );
-  }
-
-  return <>{children}</>;
+  return (
+    <div style={{ width: "100%", height: "100%", opacity, position: "relative" }}>
+      {children}
+      {overlay(type === "fade_white" ? "#ffffff" : "#000000", fadeInOverlay)}
+      {overlay(fadeOutColor, fadeOutOverlay)}
+    </div>
+  );
 };

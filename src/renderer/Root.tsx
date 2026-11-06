@@ -13,6 +13,7 @@ const defaultProps: RenderManifest = {
   totalDurationFrames: 300,
   totalDurationSeconds: 10,
   scenes: [],
+  chapters: [],
   audio: {
     masterVolume: 1.0,
     voiceTracks: [],
@@ -21,8 +22,7 @@ const defaultProps: RenderManifest = {
   },
   metadata: {
     compiledAt: new Date().toISOString(),
-    mode: "final",
-    renderScale: 1.0,
+    usesEstimatedTiming: false,
   },
 };
 
