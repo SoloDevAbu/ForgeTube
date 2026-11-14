@@ -1,11 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import {
   getProjectDir,
   getProjectsDir,
   ensureProjectDirectories,
+  projectFileName,
   sanitizeFilename,
+  topicOf,
 } from "../../shared/paths.js";
 import { atomicWriteJson, readJsonFile } from "../../shared/atomic.js";
 import { ProjectNotFoundError, ValidationError } from "../../shared/errors.js";
@@ -16,6 +18,7 @@ import {
 } from "../schemas/project.js";
 import { Logger } from "../../shared/logger.js";
 import type { ProjectState } from "../../shared/types.js";
+import { getLanguage, LANGUAGES } from "../language/languages.js";
 
 export interface CreateProjectOptions {
   name: string;
@@ -24,6 +27,8 @@ export interface CreateProjectOptions {
   width?: number;
   height?: number;
   fps?: number;
+  /** Narration language code. English when left out. */
+  language?: string;
   customBase?: string;
 }
 
@@ -34,8 +39,58 @@ export class ProjectManager {
     this.customBase = customBase;
   }
 
+  /** The folder that holds every topic. */
+  getProjectsRoot(): string {
+    return getProjectsDir(this.customBase);
+  }
+
+  /** Folder of a topic. It holds the shared research and one folder per language. */
+  getTopicRoot(projectId: string): string {
+    return path.join(getProjectsDir(this.customBase), topicOf(projectId));
+  }
+
+  /** IDs of the language versions a topic has, English first. */
+  listVersions(projectId: string): string[] {
+    const topic = topicOf(projectId);
+    const root = this.getTopicRoot(topic);
+    if (!existsSync(root)) return [];
+    const folders = new Set(readdirSync(root));
+    return Object.values(LANGUAGES)
+      .filter((l) => folders.has(l.folder) && existsSync(path.join(root, l.folder, "project.json")))
+      .map((l) => `${topic}/${l.folder}`);
+  }
+
+  /**
+   * The full "topic/language" ID. A bare topic names its only version; with
+   * two versions the language has to be said.
+   */
+  resolveId(projectId: string): string {
+    const topic = topicOf(projectId);
+    const language = projectId.split("/")[1];
+    if (language) return `${topic}/${getLanguage(language).folder}`;
+
+    if (existsSync(path.join(this.getTopicRoot(topic), "project.json"))) {
+      throw new ValidationError(`"${topic}" uses the old folder layout. Run: video-studio project migrate`);
+    }
+    const versions = this.listVersions(topic);
+    if (versions.length > 1) {
+      throw new ValidationError(`"${topic}" has more than one version. Use one of: ${versions.join(", ")}.`);
+    }
+    return versions[0] ?? `${topic}/${getLanguage(null).folder}`;
+  }
+
+  /** Another language version of the same topic that already has the given file. */
+  findSibling(projectId: string, relativeFile: string): string | null {
+    const id = this.resolveId(projectId);
+    return (
+      this.listVersions(id).find(
+        (other) => other !== id && existsSync(path.join(getProjectDir(other, this.customBase), relativeFile))
+      ) ?? null
+    );
+  }
+
   getProjectRoot(projectId: string): string {
-    return getProjectDir(projectId, this.customBase);
+    return getProjectDir(this.resolveId(projectId), this.customBase);
   }
 
   getManifestPath(projectId: string): string {
@@ -48,14 +103,17 @@ export class ProjectManager {
   }
 
   async createProject(options: CreateProjectOptions): Promise<ProjectManifest> {
-    const id = sanitizeFilename(options.name);
-    const root = this.getProjectRoot(id);
-
-    if (existsSync(root)) {
-      throw new ValidationError(`Project directory "${id}" already exists at ${root}`);
+    const language = getLanguage(options.language);
+    const topic = sanitizeFilename(options.name);
+    if (existsSync(this.getTopicRoot(topic))) {
+      throw new ValidationError(
+        `Topic "${topic}" already exists. To add another language to it, run: video-studio project add-version -p ${topic} --lang <language>`
+      );
     }
-
+    const id = `${topic}/${language.folder}`;
+    const root = this.getProjectRoot(id);
     await ensureProjectDirectories(root);
+    await fs.mkdir(path.join(this.getTopicRoot(topic), "research"), { recursive: true });
 
     const now = new Date().toISOString();
     const validated = ProjectManifestSchema.parse({
@@ -64,6 +122,7 @@ export class ProjectManager {
       name: options.name,
       topic: options.topic,
       targetMinutes: options.targetMinutes ?? 12,
+      language: language.code,
       status: "NEW",
       createdAt: now,
       updatedAt: now,
@@ -71,6 +130,8 @@ export class ProjectManager {
         width: options.width ?? 1920,
         height: options.height ?? 1080,
         fps: options.fps ?? 30,
+        speakingRateWpm: language.speakingRateWpm,
+        voice: { provider: "edge", ...language.voice },
       },
     });
     await atomicWriteJson(this.getManifestPath(id), validated);
@@ -120,15 +181,12 @@ export class ProjectManager {
     const projects: ProjectManifest[] = [];
 
     for (const entry of entries) {
-      if (entry.isDirectory() && !entry.name.startsWith(".")) {
-        const manifestPath = path.join(base, entry.name, "project.json");
-        if (existsSync(manifestPath)) {
-          try {
-            const raw = await readJsonFile(manifestPath);
-            projects.push(ProjectManifestSchema.parse(raw));
-          } catch {
-            // Ignore invalid non-project directories
-          }
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      for (const id of this.listVersions(entry.name)) {
+        try {
+          projects.push(ProjectManifestSchema.parse(await readJsonFile(this.getManifestPath(id))));
+        } catch {
+          // Ignore folders that are not projects.
         }
       }
     }
@@ -183,8 +241,9 @@ export class ProjectManager {
     }
 
     // Check last render output
-    const renderPath = path.join(root, "render", "final", `${projectId}.mp4`);
-    const draftRenderPath = path.join(root, "render", "preview", `${projectId}_draft.mp4`);
+    const fileName = projectFileName(manifest.id);
+    const renderPath = path.join(root, "render", "final", `${fileName}.mp4`);
+    const draftRenderPath = path.join(root, "render", "preview", `${fileName}_draft.mp4`);
     const lastRenderOutput = existsSync(renderPath)
       ? renderPath
       : existsSync(draftRenderPath)
@@ -225,7 +284,7 @@ export class ProjectManager {
     if (!existsSync(root)) {
       throw new ProjectNotFoundError(projectId);
     }
-    const target = path.resolve(destinationDir, projectId);
+    const target = path.resolve(destinationDir, projectFileName(this.resolveId(projectId)));
     await fs.cp(root, target, { recursive: true });
     return target;
   }
@@ -237,7 +296,7 @@ export class ProjectManager {
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const targetDir = destinationDir || path.join(getProjectsDir(this.customBase), ".backups");
-    const target = path.join(targetDir, `${projectId}_backup_${timestamp}`);
+    const target = path.join(targetDir, `${projectFileName(this.resolveId(projectId))}_backup_${timestamp}`);
     await fs.mkdir(targetDir, { recursive: true });
     await fs.cp(root, target, { recursive: true });
     return target;
@@ -311,7 +370,7 @@ function getNextRecommendedCommand(
     case "RENDERING":
       return `video-studio jobs status --project ${manifest.id}`;
     case "RENDERED":
-      return `Finished. Output is in projects/${manifest.id}/render/final`;
+      return `Finished. Output is in projects/${manifest.id}/render/final. Another language: video-studio project add-version`;
     case "FAILED":
       return `Inspect error logs at projects/${manifest.id}/logs/project.log`;
     default:

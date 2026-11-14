@@ -26,8 +26,9 @@ export class ResearchManager {
     this.stages = new StageGraph(this.pm);
   }
 
+  /** Research belongs to the topic, so every language version states the same facts. */
   getResearchDir(projectId: string): string {
-    return path.join(this.pm.getProjectRoot(projectId), "research");
+    return path.join(this.pm.getTopicRoot(projectId), "research");
   }
 
   getDossierPath(projectId: string): string {
@@ -202,11 +203,14 @@ export class ResearchManager {
     dossier.updatedAt = new Date().toISOString();
     await atomicWriteJson(this.getDossierPath(projectId), dossier);
 
-    await this.stages.markBuilt(projectId, "research");
-    const manifest = await this.pm.loadProject(projectId);
-    manifest.checkpoints.researchApproved = true;
-    await this.pm.saveProject(manifest);
-    await this.stages.markApproved(projectId, "research");
+    // One approval covers every language version of the topic.
+    for (const id of this.pm.listVersions(projectId)) {
+      await this.stages.markBuilt(id, "research");
+      const manifest = await this.pm.loadProject(id);
+      manifest.checkpoints.researchApproved = true;
+      await this.pm.saveProject(manifest);
+      await this.stages.markApproved(id, "research");
+    }
 
     const logger = new Logger(path.join(this.pm.getProjectRoot(projectId), "logs", "project.log"));
     logger.info("Research dossier approved by user", { projectId, stage: "RESEARCH" });

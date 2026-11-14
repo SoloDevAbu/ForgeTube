@@ -88,7 +88,8 @@ export class StageGraph {
 
     switch (stage) {
       case "research": {
-        const data = await readIf("research/research.json");
+        const shared = path.join(this.pm.getTopicRoot(projectId), "research", "research.json");
+        const data = existsSync(shared) ? await readJsonFile<any>(shared) : null;
         return data ? fingerprint(data) : null;
       }
       case "script": {

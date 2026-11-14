@@ -152,7 +152,7 @@ export class AssetManager {
       let sceneId = options.sceneId ?? null;
       if (!sceneId) {
         const match = filename.match(/scene_(\d+)/i);
-        if (match) sceneId = `scene_${match[1]!.padStart(3, "0")}`;
+        if (match) sceneId = `scene_${parseInt(match[1]!, 10).toString().padStart(3, "0")}`;
       }
       if (sceneId && waiting.includes(sceneId)) waiting.splice(waiting.indexOf(sceneId), 1);
       if (!sceneId && options.order) sceneId = waiting.shift() ?? null;
@@ -259,6 +259,73 @@ export class AssetManager {
       rows,
       missingScenes: report.missingScenes,
     };
+  }
+
+  /**
+   * Brings images of another project into this one, for a language version
+   * that shows the same pictures. Files are hard-linked where the disk allows,
+   * so they take no extra space, and copied otherwise.
+   */
+  async adoptImages(
+    projectId: string,
+    sourceProjectId: string,
+    items: { sceneId: string; sourceRelativePath: string }[]
+  ): Promise<Map<string, string>> {
+    const root = this.pm.getProjectRoot(projectId);
+    const sourceRoot = this.pm.getProjectRoot(sourceProjectId);
+    const manifest = await this.getAssetManifest(projectId);
+    const sourceManifest = await this.getAssetManifest(sourceProjectId);
+    const adopted = new Map<string, string>();
+
+    for (const { sceneId, sourceRelativePath } of items) {
+      const source = path.join(sourceRoot, sourceRelativePath);
+      if (!existsSync(source)) throw new AssetError(`Base image not found: ${sourceRelativePath}`);
+
+      const known = sourceManifest.assets.find((a) => a.relativePath === sourceRelativePath);
+      const meta = known ?? (await inspectMedia(source));
+      if (!meta.width || !meta.height || !meta.checksum) throw new AssetError(`Unable to read image: ${sourceRelativePath}`);
+
+      const same = manifest.assets.find((a) => a.checksum === meta.checksum && a.sceneAssociations.includes(sceneId));
+      if (same && existsSync(path.join(root, same.relativePath))) {
+        adopted.set(sceneId, same.relativePath);
+        continue;
+      }
+
+      const dir = path.join(root, "assets", "generated", "originals", sceneId);
+      await fs.mkdir(dir, { recursive: true });
+      const version = (await fs.readdir(dir)).length + 1;
+      const from = sourceProjectId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const name = `v${String(version).padStart(2, "0")}_${from}_${path.basename(sourceRelativePath)}`;
+      const target = path.join(dir, name);
+      try {
+        await fs.link(source, target);
+      } catch {
+        await fs.copyFile(source, target);
+      }
+
+      const relativePath = `assets/generated/originals/${sceneId}/${name}`;
+      manifest.assets.push({
+        assetId: `asset_img_${meta.checksum.slice(0, 12)}_${sceneId}`,
+        relativePath,
+        assetType: "image",
+        originalFilename: path.basename(sourceRelativePath),
+        importedFilename: name,
+        format: path.extname(name).slice(1).toLowerCase(),
+        width: meta.width,
+        height: meta.height,
+        durationSeconds: null,
+        fileSizeBytes: meta.fileSizeBytes ?? (await fs.stat(target)).size,
+        checksum: meta.checksum,
+        importedAt: new Date().toISOString(),
+        sceneAssociations: [sceneId],
+        status: "valid",
+        validationError: null,
+      });
+      adopted.set(sceneId, relativePath);
+    }
+
+    await this.saveAssetManifest(projectId, manifest);
+    return adopted;
   }
 
   /** Dimensions for an imported image, without re-reading it when already known. */

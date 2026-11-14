@@ -47,15 +47,40 @@ bun run bin/video-studio.js doctor
 
 Claude Code writes the words and the CLI does the rest. In Claude Code, run `/doc-film`, or use the commands below. `vs` stands for `bun run bin/video-studio.js`.
 
-1. **Create:** `vs project create --name "Rome" --topic "The history of Rome" --target-minutes 12`
+1. **Create:** `vs project create --name "Rome" --topic "The history of Rome" --target-minutes 12 --lang english`
 2. **Research:** `research brief`, `research import`, `research approve`
 3. **Script:** `script brief`, `script import`, `script approve`. Fix one segment with `script set-segment`.
 4. **Storyboard:** `storyboard brief`, `storyboard import`, `storyboard approve`, `prompts export`
 5. **Images:** generate them in Google Flow from `storyboard/prompts/batch_NN.md`, then run `assets import --input <dir> --order`.
 6. **Crop:** `calibration apply-preset --preset gemini-watermark`, `calibration contact-sheet`, `calibration set` for single scenes, `calibration approve`
 7. **Voice:** `audio voice`, `timeline compile`, and `storyboard rebalance` if a shot is too long
-8. **Sound:** `audio sfx render`, `audio music scan`, `audio music plan`, `audio mix`
+8. **Sound:** `audio sfx render`, `audio music generate` (or your own tracks and `audio music scan`), `audio music plan`, `audio mix`. `audio levels` shows and sets how far music and effects sit under the voice.
 9. **Render:** `render --mode draft`, `audio approve`, `render --mode final`
+
+## English and Hindi versions
+
+A topic lives in `projects/<topic>/`. The research sits there once, and each language is a folder beside it:
+
+```
+projects/ancient_rome/
+  research/
+  english/
+  hindi/
+```
+
+Start in either language, and add the other only if you want it:
+
+```bash
+bun run bin/video-studio.js project create --name "Ancient Rome" --topic "The history of Rome" --lang english
+```
+
+```bash
+bun run bin/video-studio.js project add-version -p ancient_rome --lang hindi
+```
+
+Commands take `-p <topic>/<language>`, for example `-p ancient_rome/hindi`. The second version reuses the approved research, so research and fact-checking happen once. Its script is a retelling in that language, and its storyboard reuses the first version's images with `img=<scene>`, in the order its own script needs. Only shots with a new prompt need a new image. Voice, mix and render are separate for each version.
+
+Projects in the old one-folder layout move over with `project migrate`.
 
 Check progress at any time:
 

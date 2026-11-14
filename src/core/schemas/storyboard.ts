@@ -94,6 +94,8 @@ export const SceneRecordSchema = z.object({
   /** Author marked this shot as deliberately under the minimum length. */
   allowShort: z.boolean().default(false),
   shortPrompt: z.string().default(""),
+  /** Base-film scene whose image this shot reuses, in a language version. */
+  reusesImageOf: z.string().nullable().default(null),
   batchId: z.string().default(""),
   sfxSuggestions: z.array(z.string()).default([]),
   musicMood: z.string().default(""),

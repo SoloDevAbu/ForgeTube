@@ -24,8 +24,19 @@ export function getProjectsDir(customBase?: string): string {
  * Returns the directory for a specific project.
  */
 export function getProjectDir(projectId: string, customBase?: string): string {
-  const sanitizedId = sanitizeFilename(projectId);
-  return path.join(getProjectsDir(customBase), sanitizedId);
+  // "topic/language": each part is its own folder.
+  const parts = projectId.split("/").filter(Boolean).map(sanitizeFilename);
+  return path.join(getProjectsDir(customBase), ...parts);
+}
+
+/** The topic part of a project ID. A topic holds one folder per language. */
+export function topicOf(projectId: string): string {
+  return sanitizeFilename(projectId.split("/")[0] ?? "");
+}
+
+/** A project ID as one word, for output file names. */
+export function projectFileName(projectId: string): string {
+  return projectId.split("/").filter(Boolean).map(sanitizeFilename).join("_");
 }
 
 /**
@@ -70,7 +81,6 @@ export function toProjectRelativePath(projectRoot: string, fullPath: string): st
  * Standard project subdirectories
  */
 export const PROJECT_SUBDIRS = [
-  "research",
   "script",
   "storyboard",
   "assets/references",

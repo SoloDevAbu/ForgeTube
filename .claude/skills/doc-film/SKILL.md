@@ -7,7 +7,9 @@ description: Make a history documentary from a topic with ForgeTube, stage by st
 
 Run commands with `bun run bin/video-studio.js`, shortened here to `vs`.
 
-1. Run `vs doctor` once, then `vs project create --name "<name>" --topic "<topic>" --target-minutes <n>`.
+`<id>` is `<topic>/<language>`, for example `ancient_rome/english` or `ancient_rome/hindi`. Make one version at a time, all the way to its render. Ask which language if the user didn't say.
+
+1. Run `vs doctor` once, then `vs project create --name "<name>" --topic "<topic>" --target-minutes <n> --lang english|hindi`.
    For an existing project, run `vs pipeline status -p <id>` and continue from the first stage that isn't approved or is stale.
 2. Use the `doc-research` skill. Stop for the user's approval.
 3. Use the `doc-script` skill. Stop for the user's approval.
@@ -26,12 +28,23 @@ Run commands with `bun run bin/video-studio.js`, shortened here to `vs`.
    - Any shot it can't fix needs another image: split it in the storyboard, re-import, and ask the user for that image.
 8. Sound:
    - `vs audio sfx render -p <id>`
-   - `vs audio music scan`, then `vs audio music plan -p <id>`
-   - Show the user the plan. They can override with `vs audio music set`.
+   - `vs audio music generate` once, if `music/` has no tracks. It makes quiet pad beds with earshot.
+   - `vs audio music plan -p <id>`. Show the user the plan. They can override with `vs audio music set`.
    - `vs audio mix -p <id>`
-   - Check balance with the earshot tools on `editing/mix.wav`, not by guessing.
+   - Music and effects must stay far under the voice. Read `vs audio levels -p <id>`, and measure `editing/stems/voice.wav` against `music.wav` and `sfx.wav` with earshot `measure`. Never raise them by guess.
 9. Render:
    - `vs render -p <id> --mode draft`. Stop for the user to review the draft.
    - `vs audio approve -p <id>`, then `vs render -p <id> --mode final`.
+
+## A second language version
+
+Only when the user asks for it. Never start it yourself after the first version is done. It works in either direction: Hindi after English, or English after Hindi.
+
+1. `vs project add-version -p <topic> --lang hindi|english` creates `<topic>/<language>`. The research is the topic's and stays approved, so skip step 2.
+2. Use the `doc-script` skill on the new ID. The brief shows how the first version tells each chapter. Stop for approval.
+3. Use the `doc-storyboard` skill on the new ID. Reuse the first version's images with `img=`, in the order this script needs. Stop for approval, then `vs prompts export -p <id>`.
+4. If it lists prompts, the user makes only those images, then `vs assets import -p <id> --input <dir> --order`.
+5. `vs calibration contact-sheet -p <id>`, check the sheets, then `vs calibration approve -p <id>`. Crops come with the reused images.
+6. Continue from step 7 above. Run `vs storyboard rebalance` after the first compile: words fall differently in each language.
 
 Never claim how something sounds or looks without a reading or an image you checked.

@@ -5,6 +5,8 @@ import { MusicLibrary } from "../../core/audio/musicLibrary.js";
 import { AudioMixer } from "../../core/audio/mixer.js";
 import { StoryboardManager } from "../../core/storyboard/storyboardManager.js";
 import { TimelineCompiler } from "../../core/timeline/timelineCompiler.js";
+import { ProjectManager } from "../../core/projects/projectManager.js";
+import { MixSettingsSchema } from "../../core/schemas/project.js";
 import { bad, guarded, ok, printIssues, printOutput } from "../output.js";
 
 export interface AudioCommandDeps {
@@ -13,10 +15,11 @@ export interface AudioCommandDeps {
   music: MusicLibrary;
   mixer: AudioMixer;
   storyboard: StoryboardManager;
+  pm: ProjectManager;
 }
 
 export function registerAudioCommands(program: Command, deps: AudioCommandDeps): void {
-  const { audio, voice, music, mixer, storyboard } = deps;
+  const { audio, voice, music, mixer, storyboard, pm } = deps;
   const cmd = program.command("audio").description("Voice, sound effects, music and the final mix");
   const json = () => Boolean(program.opts().json);
 
@@ -99,6 +102,30 @@ export function registerAudioCommands(program: Command, deps: AudioCommandDeps):
 
   const musicCmd = cmd.command("music").description("Background sound from the music folder");
   musicCmd
+    .command("generate")
+    .description("Make background beds in code with earshot and add them to the music folder")
+    .option("--seed <n>", "Another seed makes new takes beside the existing ones", (v) => parseInt(v, 10), 1)
+    .option("--seconds <n>", "Length of each bed", parseFloat)
+    .action(
+      guarded(program, async (o) => {
+        const made = await music.generateBeds({
+          seed: o.seed,
+          seconds: o.seconds,
+          onProgress: (done, total) => {
+            if (!json()) process.stdout.write(`\rBeds ${done}/${total}`);
+          },
+        });
+        if (!json()) console.log();
+        const scan = await music.scan();
+        printOutput({ ...made, tracks: scan.tracks }, json(), () => {
+          ok(`${made.generated.length} beds made, ${made.kept.length} already there, ${scan.tracks.length} tracks in the library.`);
+          for (const f of made.failed) console.log(`  error: ${f.preset}: ${f.message}`);
+          console.log("  Next: video-studio audio music plan --project <id>");
+        });
+        if (made.failed.length > 0) process.exitCode = 1;
+      })
+    );
+  musicCmd
     .command("scan")
     .description("Read new files in the music folder")
     .action(
@@ -135,6 +162,32 @@ export function registerAudioCommands(program: Command, deps: AudioCommandDeps):
       guarded(program, async (o) => {
         const plan = await music.setTrack(o.project, o.chapter, o.track);
         printOutput(plan, json(), () => ok(`${o.chapter} now uses ${o.track}.`));
+      })
+    );
+
+  cmd
+    .command("levels")
+    .description("Show or set how loud music and effects sit under the voice")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .option("--music <lufs>", "Music level before ducking, in LUFS (voice is at -16)", parseFloat)
+    .option("--sfx <db>", "Effects gain in dB", parseFloat)
+    .option("--duck <ratio>", "How hard the voice pushes the music down, 1 or more", parseFloat)
+    .option("--quiet", "Use the quiet defaults: music and effects far under the voice")
+    .action(
+      guarded(program, async (o) => {
+        const project = await pm.loadProject(o.project);
+        const levels = project.settings.mix;
+        const quiet = MixSettingsSchema.parse({});
+        if (o.quiet) Object.assign(levels, { musicLufs: quiet.musicLufs, sfxGainDb: quiet.sfxGainDb, duckRatio: quiet.duckRatio });
+        if (o.music !== undefined) levels.musicLufs = o.music;
+        if (o.sfx !== undefined) levels.sfxGainDb = o.sfx;
+        if (o.duck !== undefined) levels.duckRatio = o.duck;
+        const changed = o.quiet || o.music !== undefined || o.sfx !== undefined || o.duck !== undefined;
+        if (changed) await pm.saveProject(project);
+        printOutput(levels, json(), () => {
+          ok(`Voice ${levels.voiceLufs} LUFS, music ${levels.musicLufs} LUFS, effects ${levels.sfxGainDb} dB, duck ratio ${levels.duckRatio}.`);
+          if (changed) console.log(`  Next: video-studio audio mix --project ${o.project}`);
+        });
       })
     );
 

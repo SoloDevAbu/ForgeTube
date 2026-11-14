@@ -7,7 +7,8 @@ import { ScriptManager } from "../src/core/script/scriptManager.js";
 import { StoryboardManager } from "../src/core/storyboard/storyboardManager.js";
 import { splitWords } from "../src/core/script/scriptFormat.js";
 
-export const SAMPLE_ID = "the_pharos";
+export const SAMPLE_TOPIC = "the_pharos";
+export const SAMPLE_ID = `${SAMPLE_TOPIC}/english`;
 
 const NOW = "2026-11-07T00:00:00.000Z";
 

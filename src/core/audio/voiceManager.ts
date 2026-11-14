@@ -8,7 +8,7 @@ import { AudioManager } from "./audioManager.js";
 import { atomicWriteJson } from "../../shared/atomic.js";
 import { AssetError, ValidationError } from "../../shared/errors.js";
 import { computeFileChecksum, inspectMedia } from "../assets/mediaInspector.js";
-import { splitSpeechParts, splitWords } from "../script/scriptFormat.js";
+import { endsSentence, splitSpeechParts, splitWords } from "../script/scriptFormat.js";
 import { decodeMono, SAMPLE_RATE, writeWavMono } from "./pcm.js";
 import { speak } from "./tts/providers.js";
 import { takeSidecarPath, type VoiceTake, type VoiceWord } from "./tts/voiceTake.js";
@@ -49,7 +49,7 @@ function holdSentences(
 
   const cuts: number[] = [];
   for (let i = 0; i + 1 < words.length; i++) {
-    if (/[.!?]["')\]]?$/.test(scriptWords[i]!)) cuts.push(i);
+    if (endsSentence(scriptWords[i]!)) cuts.push(i);
   }
   if (cuts.length === 0) return { samples, words };
 

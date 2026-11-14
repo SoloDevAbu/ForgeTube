@@ -45,6 +45,31 @@ export interface MusicPlan {
   updatedAt: string;
 }
 
+export interface BedRunResult {
+  generated: string[];
+  kept: string[];
+  failed: { preset: string; message: string }[];
+}
+
+const BED_SCRIPT = path.join(REPO_ROOT, "tools", "earshot_bed.py");
+const BED_FOLDER = "earshot";
+const BED_TIMEOUT_MS = 15 * 60_000;
+const PARALLEL_BEDS = 3;
+
+/** A Python that can import earshot: its own launcher first, then the configured Python. */
+async function bedPython(): Promise<string> {
+  const { earshot, python } = await loadToolConfig();
+  if (earshot) {
+    const names = process.platform === "win32" ? ["earshot-py.cmd", "earshot-py"] : ["earshot-py"];
+    for (const name of names) {
+      const launcher = path.join(path.dirname(earshot), name);
+      if (existsSync(launcher)) return launcher;
+    }
+  }
+  if (python) return python;
+  throw new ValidationError("earshot not found. Set earshot in forgetube.config.json. Run: video-studio doctor");
+}
+
 export function getMusicDir(): string {
   return process.env.FORGETUBE_MUSIC_DIR ?? path.join(REPO_ROOT, "music");
 }
@@ -109,7 +134,7 @@ export class MusicLibrary {
     await fs.mkdir(dir, { recursive: true });
     const entries = await fs.readdir(dir, { recursive: true, withFileTypes: true });
     const files = entries
-      .filter((e) => e.isFile() && MUSIC_EXTENSIONS.has(path.extname(e.name).toLowerCase()))
+      .filter((e) => e.isFile() && !e.name.startsWith(".") && MUSIC_EXTENSIONS.has(path.extname(e.name).toLowerCase()))
       .map((e) => path.relative(dir, path.join(e.parentPath, e.name)).split(path.sep).join("/"));
 
     const index = await this.getIndex();
@@ -153,6 +178,56 @@ export class MusicLibrary {
     const removed = index.tracks.filter((t) => !tracks.some((n) => n.checksum === t.checksum)).length;
     await atomicWriteJson(this.indexPath(), { tracks, updatedAt: new Date().toISOString() } satisfies MusicIndex);
     return { scanned, skipped: tracks.length - scanned.length, removed, tracks };
+  }
+
+  /**
+   * Makes background beds in code with earshot's synthesis toolkit and adds
+   * them to the library. Existing files are kept; a new seed makes new takes.
+   */
+  async generateBeds(options?: {
+    seed?: number;
+    seconds?: number;
+    onProgress?: (done: number, total: number) => void;
+  }): Promise<BedRunResult> {
+    const runner = await bedPython();
+    const listed = await runCliCommand(runner, [BED_SCRIPT, "--list"]);
+    if (listed.exitCode !== 0) {
+      throw new ValidationError(`earshot could not be loaded for synthesis: ${listed.stderr.slice(-300)}`);
+    }
+    const presets = JSON.parse(listed.stdout.slice(listed.stdout.lastIndexOf("["))) as string[];
+
+    const dir = path.join(getMusicDir(), BED_FOLDER);
+    await fs.mkdir(dir, { recursive: true });
+    const seed = options?.seed ?? 1;
+    const result: BedRunResult = { generated: [], kept: [], failed: [] };
+    const queue = [...presets];
+    let done = 0;
+
+    const worker = async () => {
+      for (let preset = queue.shift(); preset; preset = queue.shift()) {
+        const name = seed === 1 ? `${preset}.flac` : `${preset}_take${seed}.flac`;
+        const file = path.join(dir, name);
+        if (existsSync(file)) {
+          result.kept.push(name);
+        } else {
+          const temp = path.join(dir, `.${name}.part.flac`);
+          const args = [BED_SCRIPT, preset, temp, "--seed", String(seed)];
+          if (options?.seconds) args.push("--seconds", String(options.seconds));
+          try {
+            const run = await runCliCommand(runner, args, { timeoutMs: BED_TIMEOUT_MS });
+            if (run.exitCode !== 0) throw new Error(run.stderr.slice(-300));
+            await fs.rename(temp, file);
+            result.generated.push(name);
+          } catch (err: any) {
+            await fs.rm(temp, { force: true });
+            result.failed.push({ preset, message: err.message });
+          }
+        }
+        options?.onProgress?.(++done, presets.length);
+      }
+    };
+    await Promise.all(Array.from({ length: PARALLEL_BEDS }, worker));
+    return result;
   }
 
   /** Orders candidates for a mood with earshot, or by file name without it. */

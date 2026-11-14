@@ -56,7 +56,7 @@ export function createCliProgram(): Command {
   registerPromptsCommands(program, stm);
   registerAssetCommands(program, am);
   registerCalibrationCommands(program, cm);
-  registerAudioCommands(program, { audio: audioMgr, voice, music, mixer, storyboard: stm });
+  registerAudioCommands(program, { audio: audioMgr, voice, music, mixer, storyboard: stm, pm });
   registerTimelineCommands(program, tc);
   registerRenderCommands(program, rs);
   registerJobCommands(program, jm);

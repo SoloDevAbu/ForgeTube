@@ -25,14 +25,14 @@ describe("ProjectManager & Path utilities", () => {
       targetMinutes: 12,
     });
 
-    expect(project.id).toBe("history_of_rome");
+    expect(project.id).toBe("history_of_rome/english");
     expect(project.status).toBe("NEW");
     expect(project.name).toBe("History of Rome");
     expect(project.settings.fps).toBe(30);
 
     // Verify reopen
     const loaded = await pm.loadProject("history_of_rome");
-    expect(loaded.id).toBe("history_of_rome");
+    expect(loaded.id).toBe("history_of_rome/english");
     expect(loaded.topic).toBe("The complete history of Rome");
   });
 

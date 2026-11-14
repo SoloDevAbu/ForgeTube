@@ -4,21 +4,22 @@ import { ProjectStateValues, CameraEffectValues, TransitionTypeValues } from "..
 export const VoiceSettingsSchema = z.object({
   provider: z.enum(["edge", "kokoro"]).default("edge"),
   voice: z.string().default("en-US-AndrewMultilingualNeural"),
-  /** Slow, measured documentary delivery. */
-  rate: z.string().default("-25%"),
+  /** Natural 1.0x documentary narration. */
+  rate: z.string().default("+0%"),
   pitch: z.string().default("+0Hz"),
 });
 export type VoiceSettings = z.infer<typeof VoiceSettingsSchema>;
 
 export const MixSettingsSchema = z.object({
   voiceLufs: z.number().default(-16),
-  /** Prominent bed level before ducking. */
-  musicLufs: z.number().default(-23),
-  sfxGainDb: z.number().default(-8),
+  /** Bed level before ducking. Far under the voice: felt, not listened to. */
+  musicLufs: z.number().default(-34),
+  /** Effects sit under the narration too. They colour a beat, they never hit. */
+  sfxGainDb: z.number().default(-20),
   finalLufs: z.number().default(-14),
   truePeakDb: z.number().default(-1.5),
   crossfadeSeconds: z.number().nonnegative().default(3),
-  duckRatio: z.number().min(1).default(4),
+  duckRatio: z.number().min(1).default(2),
 });
 export type MixSettings = z.infer<typeof MixSettingsSchema>;
 
@@ -62,6 +63,8 @@ export const ProjectManifestSchema = z.object({
   name: z.string().min(1),
   topic: z.string().min(1),
   targetMinutes: z.number().positive().default(12),
+  /** Narration language. Image prompts stay in English. */
+  language: z.string().default("en"),
   status: z.enum(ProjectStateValues).default("NEW"),
   createdAt: z.string(),
   updatedAt: z.string(),

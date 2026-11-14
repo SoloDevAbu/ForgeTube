@@ -32,7 +32,18 @@ export function countWords(text: string): number {
 
 /** Normalized word for matching anchors: no case, no surrounding punctuation. */
 export function normalizeWord(word: string): string {
-  return word.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+  // Marks count as part of the word: Devanagari vowel signs are marks, not letters.
+  return word.toLowerCase().replace(/^[^\p{L}\p{M}\p{N}]+|[^\p{L}\p{M}\p{N}]+$/gu, "");
+}
+
+/** True when a word closes a sentence. Covers the Hindi danda as well. */
+export function endsSentence(word: string): boolean {
+  return /[.!?।॥]["')\]”’]?$/.test(word);
+}
+
+/** Devanagari digits as ASCII, so numbers compare the same in every script. */
+export function asciiDigits(text: string): string {
+  return text.replace(/[०-९]/g, (d) => String(d.charCodeAt(0) - 0x0966));
 }
 
 export type SpeechPart = { kind: "text"; text: string } | { kind: "pause"; seconds: number };
@@ -122,6 +133,23 @@ export function renderScriptMarkdown(chapters: ScriptChapter[]): string {
 
 const ATTRIBUTION = /\b(tradition|traditionally|legend|legendary|myth|according to|said to|told|tells|claimed?|believed|reportedly|ancient writers|story goes|supposedly|perhaps|may have)\b/i;
 
+const NUMBER_WORDS = [
+  ["one", "first"], ["two", "second"], ["three", "third"], ["four", "fourth"], ["five", "fifth"],
+  ["six", "sixth"], ["seven", "seventh"], ["eight", "eighth"], ["nine", "ninth"], ["ten", "tenth"],
+  ["eleven", "eleventh"], ["twelve", "twelfth"], ["thirteen", "thirteenth"], ["fourteen", "fourteenth"],
+  ["fifteen", "fifteenth"], ["sixteen", "sixteenth"], ["seventeen", "seventeenth"], ["eighteen", "eighteenth"],
+  ["nineteen", "nineteenth"], ["twenty", "twentieth"],
+];
+
+/**
+ * Digits for the small numbers a claim spells out, so "eighth century" in a
+ * claim supports "8वीं सदी" or "8th century" in the narration.
+ */
+function spelledNumbers(evidence: string): string {
+  const words = new Set(evidence.toLowerCase().split(/[^a-z]+/));
+  return NUMBER_WORDS.flatMap((names, i) => (names.some((n) => words.has(n)) ? [String(i + 1)] : [])).join(" ");
+}
+
 export interface ClaimLookup {
   claim: string;
   kind: string;
@@ -133,7 +161,9 @@ export function checkSegmentAgainstClaims(
   segmentId: string,
   text: string,
   claimIds: string[],
-  claims: Map<string, ClaimLookup>
+  claims: Map<string, ClaimLookup>,
+  /** Extra attribution phrases for the narration's language. */
+  attribution: string[] = []
 ): string[] {
   const errors: string[] = [];
   if (claimIds.length === 0) errors.push(`${segmentId}: cites no claim.`);
@@ -145,12 +175,16 @@ export function checkSegmentAgainstClaims(
     else errors.push(`${segmentId}: unknown claim "${id}".`);
   }
 
-  if (cited.some((c) => c.kind === "tradition") && !ATTRIBUTION.test(spokenText(text))) {
-    errors.push(`${segmentId}: cites a tradition, so the text must say so (for example "according to tradition").`);
+  const spoken = asciiDigits(spokenText(text));
+  const attributed = ATTRIBUTION.test(spoken) || attribution.some((phrase) => spoken.toLowerCase().includes(phrase));
+  if (cited.some((c) => c.kind === "tradition") && !attributed) {
+    const example = attribution[0] ?? "according to tradition";
+    errors.push(`${segmentId}: cites a tradition, so the text must say so (for example "${example}").`);
   }
 
-  const evidence = cited.map((c) => `${c.claim} ${c.time_period ?? ""}`).join(" ");
-  for (const number of spokenText(text).match(/\d[\d,]*/g) ?? []) {
+  const stated = cited.map((c) => `${c.claim} ${c.time_period ?? ""}`).join(" ");
+  const evidence = `${stated} ${spelledNumbers(stated)}`;
+  for (const number of spoken.match(/\d[\d,]*/g) ?? []) {
     const plain = number.replace(/,/g, "");
     if (!evidence.replace(/,/g, "").includes(plain)) {
       errors.push(`${segmentId}: says "${number}", which no cited claim contains.`);

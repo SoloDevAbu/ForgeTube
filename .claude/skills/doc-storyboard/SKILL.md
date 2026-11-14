@@ -18,4 +18,14 @@ description: Plan a documentary's shots and Google Flow image prompts from an ap
 7. Run `storyboard import -p <id> -i <file>`, then fix what it prints. Re-importing keeps existing images and crops.
 8. Stop for the user's review, then run `storyboard approve` and `prompts export`.
 
+## Second version of a topic
+
+When the other language version already has shots, the brief lists its images by chapter.
+
+- Cut shots to this version's narration. The count and order will differ from the other version.
+- For each shot, pick the image that fits and write `= | img=<scene>`. It brings the image and its crop.
+- Write a new English prompt, without `img=`, only when no existing image fits. Each one costs the user a new image, so keep them few.
+- Don't show the same image twice in a row.
+- Leave out the `# style` block to keep the other version's look.
+
 Stills only. Never write prompts for character animation.

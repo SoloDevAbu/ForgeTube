@@ -1,9 +1,73 @@
 import { Command } from "commander";
 import { ProjectManager } from "../../core/projects/projectManager.js";
-import { printOutput, printError } from "../output.js";
+import { VariantManager } from "../../core/projects/variantManager.js";
+import { LANGUAGE_FOLDERS } from "../../core/language/languages.js";
+import { guarded, ok, printOutput, printError } from "../output.js";
 
 export function registerProjectCommands(program: Command, pm: ProjectManager): void {
   const projectCmd = program.command("project").description("Manage video projects");
+  const variants = new VariantManager(pm);
+  const languageCodes = LANGUAGE_FOLDERS.join(", ");
+
+  projectCmd
+    .command("add-version")
+    .alias("localize")
+    .description("Add another language version to a topic. It shares the research and can reuse the images")
+    .requiredOption("-p, --project <topic>", "The topic, for example ancient_rome")
+    .requiredOption("-l, --lang <language>", `Language of the new version (${languageCodes})`)
+    .action(
+      guarded(program, async (o) => {
+        const result = await variants.addVersion(o.project, o.lang);
+        printOutput(result, program.opts().json, () => {
+          const { project } = result;
+          if (!result.created) {
+            ok(`${project.id} already exists.`);
+            return;
+          }
+          ok(`Created ${project.id}, starting from the settings of ${result.from}.`);
+          console.log(`  Voice: ${project.settings.voice.voice} at ${project.settings.voice.rate}`);
+          console.log(`  Research is shared by the topic${project.checkpoints.researchApproved ? " and already approved" : ""}.`);
+          if (result.musicPlanCopied) console.log(`  Music plan copied from ${result.from}.`);
+          const next = project.checkpoints.researchApproved ? "script brief" : "research brief";
+          console.log(`  Next: video-studio ${next} --project ${project.id}`);
+        });
+      })
+    );
+
+  projectCmd
+    .command("migrate")
+    .description("Move projects from the old layout into projects/<topic>/<language>")
+    .action(
+      guarded(program, async () => {
+        const rows = await variants.migrate();
+        printOutput(rows, program.opts().json, () => {
+          if (rows.length === 0) ok("Nothing to migrate.");
+          for (const r of rows) console.log(`  ${r.from} -> ${r.to}${r.note ? `  (${r.note})` : ""}`);
+        });
+      })
+    );
+
+  projectCmd
+    .command("set-voice")
+    .description("Change the narration voice, speed or pitch")
+    .requiredOption("-p, --project <id>", "Project ID")
+    .option("-v, --voice <name>", "Edge TTS voice, for example hi-IN-SwaraNeural")
+    .option("-r, --rate <rate>", "Speed, for example -8% or +5%")
+    .option("--pitch <pitch>", "Pitch, for example -2Hz")
+    .action(
+      guarded(program, async (o) => {
+        const project = await pm.loadProject(o.project);
+        const { voice } = project.settings;
+        if (o.voice) voice.voice = o.voice;
+        if (o.rate) voice.rate = /^[+-]/.test(o.rate) ? o.rate : `+${o.rate}`;
+        if (o.pitch) voice.pitch = /^[+-]/.test(o.pitch) ? o.pitch : `+${o.pitch}`;
+        await pm.saveProject(project);
+        printOutput(voice, program.opts().json, () => {
+          ok(`${o.project} voice: ${voice.voice}, rate ${voice.rate}, pitch ${voice.pitch}.`);
+          console.log(`  Next: video-studio audio voice --project ${o.project}`);
+        });
+      })
+    );
 
   projectCmd
     .command("create")
@@ -14,6 +78,7 @@ export function registerProjectCommands(program: Command, pm: ProjectManager): v
     .option("-w, --width <width>", "Video frame width", (val) => parseInt(val, 10), 1920)
     .option("-h, --height <height>", "Video frame height", (val) => parseInt(val, 10), 1080)
     .option("-f, --fps <fps>", "Video frame rate", (val) => parseInt(val, 10), 30)
+    .option("-l, --lang <language>", `Narration language (${languageCodes})`, "english")
     .action(async (options) => {
       try {
         const globalOpts = program.opts();
@@ -24,13 +89,14 @@ export function registerProjectCommands(program: Command, pm: ProjectManager): v
           width: options.width,
           height: options.height,
           fps: options.fps,
+          language: options.lang,
         });
 
         printOutput(project, globalOpts.json, () => {
           console.log(`\x1b[32m✔\x1b[0m Project created successfully: \x1b[1m${project.id}\x1b[0m`);
           console.log(`  Topic: ${project.topic}`);
           console.log(`  Target: ${project.targetMinutes} minutes @ ${project.settings.width}x${project.settings.height} (${project.settings.fps} FPS)`);
-          console.log(`  Next step: video-studio research run --project ${project.id}`);
+          console.log(`  Next step: video-studio research brief --project ${project.id}`);
         });
       } catch (err: any) {
         printError(err, program.opts().json);

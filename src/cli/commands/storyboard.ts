@@ -118,6 +118,11 @@ export function registerPromptsCommands(program: Command, stm: StoryboardManager
           force: o.force,
         });
         printOutput(result, program.opts().json, () => {
+          if (result.promptCount === 0) {
+            ok("Every shot already has an image. No prompts to export.");
+            console.log(`  Next: video-studio calibration contact-sheet --project ${o.project}`);
+            return;
+          }
           ok(`${result.promptCount} prompts in ${Math.max(result.batchPaths.length, 1)} file(s): ${result.exportPath}`);
           console.log(`  Next: generate images in Google Flow, then`);
           console.log(`  video-studio assets import --project ${o.project} --input <dir> --order`);

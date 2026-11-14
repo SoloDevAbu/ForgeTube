@@ -13,6 +13,7 @@ import {
 import { atomicWriteJson, atomicWriteFile, readJsonFile } from "../../shared/atomic.js";
 import { ValidationError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
+import { getLanguage } from "../language/languages.js";
 import {
   checkSegmentAgainstClaims,
   countWords,
@@ -33,15 +34,14 @@ export interface ScriptValidationResult {
   segmentCount: number;
 }
 
-/** Slow documentary pacing, in spoken words per minute. */
-const MIN_WPM = 125;
-const MAX_WPM = 135;
+/** Slow documentary pacing: a band around the voice's spoken words per minute. */
+const WPM_BAND = 5;
 const WORD_TOLERANCE = 0.1;
 
-export function wordTarget(targetMinutes: number): { min: number; max: number } {
+export function wordTarget(targetMinutes: number, wpm = 130): { min: number; max: number } {
   return {
-    min: Math.round(targetMinutes * MIN_WPM * (1 - WORD_TOLERANCE)),
-    max: Math.round(targetMinutes * MAX_WPM * (1 + WORD_TOLERANCE)),
+    min: Math.round(targetMinutes * (wpm - WPM_BAND) * (1 - WORD_TOLERANCE)),
+    max: Math.round(targetMinutes * (wpm + WPM_BAND) * (1 + WORD_TOLERANCE)),
   };
 }
 
@@ -73,8 +73,11 @@ export class ScriptManager {
     const project = await this.pm.loadProject(projectId);
     const research = await this.rm.getResearch(projectId);
     const script = existsSync(this.getManifestPath(projectId)) ? await this.getScriptManifest(projectId) : null;
-    const { min, max } = wordTarget(project.targetMinutes);
+    const language = getLanguage(project.language);
+    const { min, max } = wordTarget(project.targetMinutes, project.settings.speakingRateWpm);
     const totalSeconds = research.chapters.reduce((sum, c) => sum + c.estimated_duration_seconds, 0);
+    const baseId = this.pm.findSibling(projectId, "script/narration.json");
+    const base = baseId ? await this.getScriptManifest(baseId) : null;
 
     const format = [
       "Format:",
@@ -82,9 +85,18 @@ export class ScriptManager {
       "## narration_001 [clm_a,clm_b]",
       "Text. Use [pause] or [pause 1.2] for a held beat.",
       "",
-      "Rules: slow documentary narration, plain spoken English, one idea per sentence.",
+      ...language.scriptRules,
       "Segment IDs run in order across the film. Every segment cites the claims it uses.",
-      "Claims of kind tradition must be attributed in the text. Any number must appear in a cited claim.",
+      language.attribution.length > 0
+        ? `Claims of kind tradition must be attributed in the text, for example with "${language.attribution[0]}" or "${language.attribution[7] ?? language.attribution[1]}".`
+        : "Claims of kind tradition must be attributed in the text.",
+      "Any number must appear in a cited claim.",
+      ...(base
+        ? [
+            `This is the ${language.name} version. "${baseId}" already tells this film. Keep the chapter IDs and the facts.`,
+            "Segment count, order inside a chapter and wording are yours to choose.",
+          ]
+        : []),
     ];
 
     if (!chapterId) {
@@ -129,8 +141,20 @@ export class ScriptManager {
         (c) => `- ${c.claim_id} (${c.kind}, ${c.confidence}): ${c.claim}${c.caveat ? ` Caveat: ${c.caveat}` : ""}`
       ),
       "",
+      ...this.baseChapterLines(base, chapterId),
       ...format,
     ].join("\n");
+  }
+
+  /** How the version written first tells a chapter, as a reference for this language. */
+  private baseChapterLines(base: ScriptManifest | null, chapterId: string): string[] {
+    const chapter = base?.chapters.find((c) => c.chapter_id === chapterId);
+    if (!chapter) return [];
+    return [
+      "The other version tells this chapter as follows. Retell it, do not translate it:",
+      ...chapter.segments.map((s) => `- [${s.source_claim_ids.join(",")}] ${s.text}`),
+      "",
+    ];
   }
 
   private toChapter(parsed: ParsedChapter, number: number, wpm: number, firstSegment: number): ScriptChapter {
@@ -167,8 +191,9 @@ export class ScriptManager {
     const parsed = parseScriptMarkdown(await fs.readFile(inputFile, "utf-8"));
 
     const claims = new Map(research.claims.map((c) => [c.claim_id, c]));
+    const { attribution } = getLanguage(project.language);
     const importErrors = parsed.flatMap((c) =>
-      c.segments.flatMap((s) => checkSegmentAgainstClaims(s.segmentId, s.text, s.claimIds, claims))
+      c.segments.flatMap((s) => checkSegmentAgainstClaims(s.segmentId, s.text, s.claimIds, claims, attribution))
     );
     if (importErrors.length > 0) {
       throw new ValidationError(`Script rejected:\n${importErrors.join("\n")}`);
@@ -234,7 +259,8 @@ export class ScriptManager {
       segmentId,
       text,
       claimIds,
-      new Map(research.claims.map((c) => [c.claim_id, c]))
+      new Map(research.claims.map((c) => [c.claim_id, c])),
+      getLanguage(project.language).attribution
     );
     if (errors.length > 0) throw new ValidationError(errors.join("\n"));
 
@@ -268,6 +294,8 @@ export class ScriptManager {
   async validateScript(projectId: string): Promise<ScriptValidationResult> {
     const manifest = await this.getScriptManifest(projectId);
     const research = await this.rm.getResearch(projectId);
+    const project = await this.pm.loadProject(projectId);
+    const { attribution } = getLanguage(project.language);
     const errors: string[] = [];
     const warnings: string[] = [];
     const claims = new Map(research.claims.map((c) => [c.claim_id, c]));
@@ -280,14 +308,14 @@ export class ScriptManager {
         segmentCount++;
         if (seen.has(seg.segment_id)) errors.push(`Duplicate segment ID "${seg.segment_id}".`);
         seen.add(seg.segment_id);
-        errors.push(...checkSegmentAgainstClaims(seg.segment_id, seg.text, seg.source_claim_ids, claims));
+        errors.push(...checkSegmentAgainstClaims(seg.segment_id, seg.text, seg.source_claim_ids, claims, attribution));
       }
     }
 
     const missing = research.chapters.filter((r) => !manifest.chapters.some((c) => c.chapter_id === r.chapter_id));
     for (const chapter of missing) warnings.push(`Chapter "${chapter.chapter_id}" has not been written yet.`);
 
-    const { min, max } = wordTarget(manifest.targetMinutes);
+    const { min, max } = wordTarget(manifest.targetMinutes, project.settings.speakingRateWpm);
     if (missing.length === 0 && (manifest.totalWordCount < min || manifest.totalWordCount > max)) {
       errors.push(
         `Word count ${manifest.totalWordCount} is outside ${min}-${max} for a ${manifest.targetMinutes}-minute film.`

@@ -264,7 +264,8 @@ export function rebalanceShots(
     if (!segShots.some((s) => (durationByScene.get(s.sceneId) ?? 0) > maxFrames)) continue;
 
     const segment = segments.find((s) => s.segmentId === seg.segmentId)!;
-    const voiceSeconds = (seg.voiceFrames) / options.fps;
+    // The same voice length the compiler uses, so both place a word on the same frame.
+    const voiceSeconds = segment.voiceSeconds ?? estimateSeconds(segment.wordCount, options.speakingRateWpm);
     const wordFrame = (w: number) => Math.round(wordStartSeconds(segment, voiceSeconds, w) * options.fps);
     const totalFrames = seg.endFrame - seg.startFrame;
     const n = segShots.length;

@@ -14,6 +14,8 @@ export interface ParsedShot {
   transition: TransitionType | null;
   sfx: string[];
   allowShort: boolean;
+  /** Scene of the other language version whose image this shot reuses. */
+  baseScene: string | null;
 }
 
 export interface ParsedStoryboard {
@@ -44,6 +46,7 @@ function parseOptions(raw: string | undefined, where: string) {
     transition: null as TransitionType | null,
     sfx: [] as string[],
     allowShort: false,
+    baseScene: null as string | null,
   };
   for (const token of raw?.trim().split(/\s+/).filter(Boolean) ?? []) {
     if (token === "short") {
@@ -65,6 +68,10 @@ function parseOptions(raw: string | undefined, where: string) {
       options.transition = transition;
     } else if (key === "sfx") {
       options.sfx = value.split(",").filter(Boolean);
+    } else if (key === "img") {
+      const number = value.match(/^(?:scene_)?(\d+)$/i);
+      if (!number) throw new ValidationError(`${where}: img= needs a base scene, for example img=scene_012.`);
+      options.baseScene = `scene_${number[1]!.padStart(3, "0")}`;
     } else {
       throw new ValidationError(`${where}: unknown option "${key}".`);
     }
@@ -90,8 +97,10 @@ function findAnchorEnd(words: string[], anchor: string[], from: number): number 
  *   # chapter chapter_01 | mood: tense, low strings
  *   narration_001 | closing words of the shot | image prompt | cam=pan_left tr=dissolve sfx=impact/deep
  *   narration_001 | * | image prompt
+ *   narration_002 | * | = | img=scene_012
  *
- * The second field names the last words the shot covers. "*" means through the
+ * img= reuses an image of the topic's other language version. A prompt of "="
+ * then takes the base shot's prompt. The second field names the last words the shot covers. "*" means through the
  * end of the segment. IDs, filenames, timing and defaults come from code.
  */
 export function parseStoryboardFile(

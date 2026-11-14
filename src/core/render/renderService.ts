@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { projectFileName } from "../../shared/paths.js";
 import { ProjectManager } from "../projects/projectManager.js";
 import { TimelineCompiler } from "../timeline/timelineCompiler.js";
 import { AudioMixer } from "../audio/mixer.js";
@@ -126,9 +127,10 @@ export class RenderService {
   }
 
   private outputPathFor(root: string, projectId: string, options: RenderServiceOptions): string {
-    if (options.mode === "final") return path.join(root, "render", "final", `${projectId}.mp4`);
-    if (options.mode === "draft") return path.join(root, "render", "preview", `${projectId}_draft.mp4`);
-    return path.join(root, "render", "preview", `${projectId}_${options.sceneId}.mp4`);
+    const name = projectFileName(this.pm.resolveId(projectId));
+    if (options.mode === "final") return path.join(root, "render", "final", `${name}.mp4`);
+    if (options.mode === "draft") return path.join(root, "render", "preview", `${name}_draft.mp4`);
+    return path.join(root, "render", "preview", `${name}_${options.sceneId}.mp4`);
   }
 
   /** Stitches chunks and adds the mix. The previous output stays until the new one is complete. */

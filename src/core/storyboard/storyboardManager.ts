@@ -5,6 +5,7 @@ import { ProjectManager } from "../projects/projectManager.js";
 import { ScriptManager } from "../script/scriptManager.js";
 import { ResearchManager } from "../research/researchManager.js";
 import { StageGraph } from "../pipeline/stageGraph.js";
+import { AssetManager } from "../assets/assetManager.js";
 import {
   StoryboardManifestSchema,
   type StoryboardManifest,
@@ -71,6 +72,8 @@ export class StoryboardManager {
     const chapters = chapterId ? script.chapters.filter((c) => c.chapter_id === chapterId) : script.chapters;
     if (chapters.length === 0) throw new ValidationError(`Chapter "${chapterId}" not found.`);
 
+    const baseId = this.pm.findSibling(projectId, "storyboard/scenes.json");
+    const base = await this.baseStoryboard(baseId);
     const lines = [
       `# Storyboard brief: ${project.topic}`,
       `Stills only, no character animation. Each image lasts ${maxShotSeconds} s at most, about ${maxWords} words of narration.`,
@@ -98,6 +101,17 @@ export class StoryboardManager {
       "Leave them out unless the story needs them. Cuts are the default and chapters fade in by themselves.",
       "",
     ];
+    if (base) {
+      lines.push(
+        `"${baseId}" is the same film in another language and already has shots. Reuse its images:`,
+        "narration_001 | last words of this shot | = | img=scene_012",
+        'img=<base scene> shows that image with its crop, and a prompt of "=" keeps its prompt.',
+        "Write a new prompt, without img=, only where no base image fits. Each of those needs a new image.",
+        "Prompts stay in English. Shot count follows this narration, not the other version.",
+        "Leave out the # style block and a chapter's mood to keep the other version's.",
+        ""
+      );
+    }
 
     for (const chapter of chapters) {
       lines.push(`## ${chapter.chapter_id}: ${chapter.title} (${chapter.time_period})`);
@@ -106,9 +120,20 @@ export class StoryboardManager {
         const shots = Math.ceil(estimateSeconds(words, wpm) / maxShotSeconds);
         lines.push(`${segment.segment_id} (${words} words, at least ${shots} shots): ${segment.text}`);
       }
+      const baseShots = base?.scenes.filter((s) => s.chapterId === chapter.chapter_id) ?? [];
+      if (baseShots.length > 0) {
+        lines.push("", `Images of ${baseId} for ${chapter.chapter_id} (id: what its narration says there > the image):`);
+        for (const s of baseShots) lines.push(`${s.sceneId}: ${s.narration} > ${s.shortPrompt}`);
+      }
       lines.push("");
     }
     return lines.join("\n");
+  }
+
+  /** Storyboard of the film this one is a language version of, if it has one. */
+  private async baseStoryboard(baseId: string | null): Promise<StoryboardManifest | null> {
+    if (!baseId || !existsSync(this.getScenesPath(baseId)) || !existsSync(this.getPromptsPath(baseId))) return null;
+    return this.getStoryboard(baseId);
   }
 
   /** Imports the compact storyboard, keeping IDs, images and crops of shots that survive. */
@@ -152,11 +177,46 @@ export class StoryboardManager {
     });
     if (errors.length > 0) throw new ValidationError(`Storyboard rejected:\n${errors.join("\n")}`);
 
+    // Shots that reuse an image of the other language version.
+    const root = this.pm.getProjectRoot(projectId);
+    const baseId = this.pm.findSibling(projectId, "storyboard/scenes.json");
+    const base = await this.baseStoryboard(baseId);
+    const baseRoot = baseId ? this.pm.getProjectRoot(baseId) : "";
+    if (base) {
+      // The look and the music moods come from the other version unless this file sets its own.
+      if (!parsed.style.artisticDirection) parsed.style = base.visualStyleGuide;
+      for (const chapterId of Object.keys(parsed.chapterMoods)) {
+        parsed.chapterMoods[chapterId] ||= base.chapterMoods[chapterId] ?? "";
+      }
+    }
+    const baseScenes = new Map<ParsedShot, SceneRecord>();
+    for (const shot of parsed.shots) {
+      const label = `${shot.segmentId} ending at word ${shot.wordEnd}`;
+      if (!shot.baseScene) {
+        if (shot.prompt === "=") errors.push(`${label}: a prompt of "=" needs img=<base scene>.`);
+        continue;
+      }
+      if (!base) {
+        errors.push(`${label}: img= needs another language version of this topic that has a storyboard.`);
+        continue;
+      }
+      const source = base.scenes.find((s) => s.sceneId === shot.baseScene);
+      if (!source) errors.push(`${label}: "${shot.baseScene}" is not a scene of ${baseId}.`);
+      else if (!existsSync(path.join(baseRoot, source.visual.image))) {
+        errors.push(`${label}: ${shot.baseScene} of ${baseId} has no image yet.`);
+      } else {
+        baseScenes.set(shot, source);
+        if (shot.prompt === "=") shot.prompt = source.shortPrompt;
+      }
+    }
+    if (errors.length > 0) throw new ValidationError(`Storyboard rejected:\n${errors.join("\n")}`);
+
     const existing = previous?.scenes ?? [];
     const claimed = new Set<string>();
     const findExisting = (shot: ParsedShot): SceneRecord | undefined => {
       const free = existing.filter((s) => !claimed.has(s.sceneId));
       return (
+        free.find((s) => s.shortPrompt === shot.prompt && s.reusesImageOf === shot.baseScene) ??
         free.find((s) => s.shortPrompt === shot.prompt) ??
         free.find((s) => s.narrationSegmentIds[0] === shot.segmentId && s.wordEnd === shot.wordEnd)
       );
@@ -169,14 +229,30 @@ export class StoryboardManager {
     });
 
     let nextId = Math.max(0, ...existing.map((s) => parseInt(s.sceneId.replace(/\D/g, ""), 10) || 0)) + 1;
+    const sceneIds = parsed.shots.map((_, i) => reused[i]?.sceneId ?? sceneIdFor(nextId++));
+
+    // A shot keeps its own image and crop unless it now points at a different base image.
+    const adopt = parsed.shots.flatMap((shot, i) => {
+      const source = baseScenes.get(shot);
+      const old = reused[i];
+      const unchanged = old?.reusesImageOf === shot.baseScene && existsSync(path.join(root, old.visual.image));
+      return source && !unchanged ? [{ sceneId: sceneIds[i]!, sourceRelativePath: source.visual.image }] : [];
+    });
+    const adopted =
+      adopt.length > 0
+        ? await new AssetManager(this.pm).adoptImages(projectId, baseId!, adopt)
+        : new Map<string, string>();
+
     let previousCamera: CameraEffect | null = null;
     let previousChapter = "";
     let added = 0;
 
     const scenes: SceneRecord[] = parsed.shots.map((shot, i) => {
       const old = reused[i];
-      const sceneId = old?.sceneId ?? sceneIdFor(nextId++);
+      const sceneId = sceneIds[i]!;
       if (!old) added++;
+      const source = baseScenes.get(shot);
+      const adoptedImage = adopted.get(sceneId);
 
       const seconds = shotSeconds(shot);
       const chapter = script.chapters.find((c) => c.chapter_id === shot.chapterId)!;
@@ -204,6 +280,7 @@ export class StoryboardManager {
         wordEnd: shot.wordEnd,
         allowShort: shot.allowShort,
         shortPrompt: shot.prompt,
+        reusesImageOf: shot.baseScene,
         batchId: `batch_${String(Math.floor(i / BATCH_SIZE) + 1).padStart(2, "0")}`,
         sfxSuggestions: shot.sfx,
         musicMood: parsed.chapterMoods[shot.chapterId] ?? "",
@@ -211,14 +288,16 @@ export class StoryboardManager {
         suggestedDurationSeconds: Math.max(0.1, Math.round(seconds * 100) / 100),
         actualVoiceDurationFrames: null,
         timeline: old?.timeline ?? { startFrame: null, endFrame: null, durationFrames: null, fps: settings.fps },
-        visual: old?.visual ?? {
-          type: "image",
-          image: `assets/generated/${sceneId}.png`,
-          fit: "cover",
-          crop: null,
-          position: { x: 0.5, y: 0.5 },
-          zoom: 1,
-        },
+        visual: adoptedImage
+          ? { ...source!.visual, image: adoptedImage }
+          : (old?.visual ?? {
+              type: "image",
+              image: `assets/generated/${sceneId}.png`,
+              fit: "cover",
+              crop: null,
+              position: { x: 0.5, y: 0.5 },
+              zoom: 1,
+            }),
         camera: { effect: camera, intensity: shot.intensity, origin: "center", direction: null },
         transition,
         audio: { voice: null, soundEffects: [] },
@@ -226,7 +305,9 @@ export class StoryboardManager {
         sourceClaimIds: script.chapters
           .flatMap((c) => c.segments)
           .find((s) => s.segment_id === shot.segmentId)!.source_claim_ids,
-        status: old?.status ?? { image: "missing", calibration: "not_started", audio: "missing", review: "needs_review" },
+        status: adoptedImage
+          ? { image: "imported", calibration: source!.status.calibration, audio: "missing", review: "needs_review" }
+          : (old?.status ?? { image: "missing", calibration: "not_started", audio: "missing", review: "needs_review" }),
       };
     });
 
@@ -247,6 +328,15 @@ export class StoryboardManager {
     await atomicWriteJson(this.getPromptsPath(projectId), prompts);
     await this.pm.updateState(projectId, "STORYBOARD_REVIEW");
     await this.stages.markBuilt(projectId, "storyboard");
+    if (adopted.size > 0) await this.stages.markBuilt(projectId, "images");
+
+    if (parsed.shots.some((s) => s.baseScene)) {
+      const need = scenes.filter((s) => !existsSync(path.join(root, s.visual.image))).map((s) => s.sceneId);
+      warnings.push(
+        `${scenes.length - need.length} shot(s) have an image, ${need.length} need a new one` +
+          (need.length > 0 ? `: ${need.join(", ")}.` : ".")
+      );
+    }
 
     const removed = existing.length - claimed.size;
     if (removed > 0) warnings.push(`${removed} earlier shot(s) were removed. Their images stay on disk.`);
@@ -400,6 +490,14 @@ export class StoryboardManager {
     else if (options?.chapterId) scenes = scenes.filter((s) => s.chapterId === options.chapterId);
     if (scenes.length === 0) throw new ValidationError("No matching prompts found for export criteria.");
 
+    // Shots showing a base-film image need no prompt.
+    const root = this.pm.getProjectRoot(projectId);
+    scenes = scenes.filter((s) => !(s.reusesImageOf && existsSync(path.join(root, s.visual.image))));
+    if (scenes.length === 0) {
+      if (!partial) await this.markPromptsExported(projectId);
+      return { exportContent: "", exportPath: "", promptCount: 0, batchPaths: [] };
+    }
+
     const promptsDir = path.join(this.getStoryboardDir(projectId), "prompts");
     const suffix = options?.sceneId ?? options?.chapterId;
     const sections: string[] = [];
@@ -441,14 +539,23 @@ export class StoryboardManager {
         : batchPaths[0]!;
     if (format === "json") await atomicWriteFile(exportPath, exportContent);
 
-    if (!partial) {
-      const project = await this.pm.loadProject(projectId);
-      project.checkpoints.promptsExported = true;
-      if (project.status === "STORYBOARD_REVIEW") project.status = "WAITING_FOR_MANUAL_IMAGES";
-      await this.pm.saveProject(project);
-    }
+    if (!partial) await this.markPromptsExported(projectId);
 
     return { exportContent, exportPath, promptCount: scenes.length, batchPaths };
+  }
+
+  /** Moves on to the image stage, or past it when every shot already has its image. */
+  private async markPromptsExported(projectId: string): Promise<void> {
+    const root = this.pm.getProjectRoot(projectId);
+    const { scenes } = await this.getStoryboard(projectId);
+    const complete = scenes.every((s) => existsSync(path.join(root, s.visual.image)));
+    const project = await this.pm.loadProject(projectId);
+    project.checkpoints.promptsExported = true;
+    if (complete) project.checkpoints.assetsImported = true;
+    if (project.status === "STORYBOARD_REVIEW") {
+      project.status = complete ? "ASSETS_IMPORTED" : "WAITING_FOR_MANUAL_IMAGES";
+    }
+    await this.pm.saveProject(project);
   }
 
   /** Moves shot boundaries to fit the limit using real voice timings. No LLM involved. */

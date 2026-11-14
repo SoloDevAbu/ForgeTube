@@ -17,4 +17,18 @@ description: Write a documentary narration script from approved research and imp
 5. Fix errors with `script set-segment`. Don't rewrite whole chapters for small fixes, and don't read back what you wrote.
 6. Stop for the user's review, then run `script approve`.
 
-Aim for the word range the brief gives. It sets the film's length at about 130 words a minute.
+Aim for the word range the brief gives. It sets the film's length from the voice's real pace.
+
+## Second version of a topic
+
+When the topic already has a script in the other language, the brief shows that telling for each chapter.
+
+- Retell it in natural spoken language. Don't translate line by line.
+- Split, merge or reorder segments inside a chapter where it flows better. Keep chapter IDs and facts.
+- Don't research again. Use the claims in the brief.
+
+## Hindi
+
+- Write in Devanagari, in everyday Hindustani.
+- Attribute legends in Hindi ("परंपरा के अनुसार", "कहा जाता है").
+- Write years and counts as digits. End sentences with the danda (।).
