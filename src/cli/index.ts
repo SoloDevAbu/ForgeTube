@@ -23,6 +23,8 @@ import { registerAudioCommands, registerTimelineCommands } from "./commands/audi
 import { registerRenderCommands, registerJobCommands } from "./commands/render.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerPipelineCommands } from "./commands/pipeline.js";
+import { registerPublishCommands } from "./commands/publish.js";
+import { PublishManager } from "../core/publish/publishManager.js";
 
 export function createCliProgram(): Command {
   const program = new Command();
@@ -60,6 +62,7 @@ export function createCliProgram(): Command {
   registerTimelineCommands(program, tc);
   registerRenderCommands(program, rs);
   registerJobCommands(program, jm);
+  registerPublishCommands(program, new PublishManager(pm, tc));
   registerDoctorCommand(program);
   registerPipelineCommands(program, new StageGraph(pm));
 

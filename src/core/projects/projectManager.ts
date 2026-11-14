@@ -370,7 +370,7 @@ function getNextRecommendedCommand(
     case "RENDERING":
       return `video-studio jobs status --project ${manifest.id}`;
     case "RENDERED":
-      return `Finished. Output is in projects/${manifest.id}/render/final. Another language: video-studio project add-version`;
+      return `Rendered to projects/${manifest.id}/render/final. Upload package: video-studio thumbnail brief --project ${manifest.id}`;
     case "FAILED":
       return `Inspect error logs at projects/${manifest.id}/logs/project.log`;
     default:

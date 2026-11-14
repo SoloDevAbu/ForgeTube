@@ -56,6 +56,8 @@ Claude Code writes the words and the CLI does the rest. In Claude Code, run `/do
 7. **Voice:** `audio voice`, `timeline compile`, and `storyboard rebalance` if a shot is too long
 8. **Sound:** `audio sfx render`, `audio music generate` (or your own tracks and `audio music scan`), `audio music plan`, `audio mix`. `audio levels` shows and sets how far music and effects sit under the voice.
 9. **Render:** `render --mode draft`, `audio approve`, `render --mode final`
+10. **Thumbnails:** `thumbnail brief`, then `thumbnail make --input <plan>` renders three 1280×720 variants and a review sheet into `publish/thumbnails/`.
+11. **Publish:** `publish brief`, `publish import --input <file>`, `publish pack`. The package in `publish/` holds three titles, the description with chapters and hashtags, tags, `subtitles.srt` and `transcript.txt`.
 
 ## English and Hindi versions
 

@@ -35,6 +35,9 @@ Run commands with `bun run bin/video-studio.js`, shortened here to `vs`.
 9. Render:
    - `vs render -p <id> --mode draft`. Stop for the user to review the draft.
    - `vs audio approve -p <id>`, then `vs render -p <id> --mode final`.
+10. Upload package, once the final render is done:
+   - Use the `doc-thumbnail` skill. Stop for the user's review of the three thumbnails.
+   - Use the `doc-publish` skill for three titles, the description, hashtags, tags, subtitles and transcript.
 
 ## A second language version
 
@@ -46,5 +49,6 @@ Only when the user asks for it. Never start it yourself after the first version 
 4. If it lists prompts, the user makes only those images, then `vs assets import -p <id> --input <dir> --order`.
 5. `vs calibration contact-sheet -p <id>`, check the sheets, then `vs calibration approve -p <id>`. Crops come with the reused images.
 6. Continue from step 7 above. Run `vs storyboard rebalance` after the first compile: words fall differently in each language.
+7. Its upload package is its own: thumbnail text, titles, description and tags are written again in its language.
 
 Never claim how something sounds or looks without a reading or an image you checked.

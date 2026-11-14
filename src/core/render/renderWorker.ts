@@ -9,8 +9,13 @@ import { REPO_ROOT } from "../../shared/paths.js";
 import { getLocalBrowserExecutable } from "./browserLocator.js";
 
 const WORKER_PATH = path.join(REPO_ROOT, "src", "render-worker", "render.mjs");
-const ENTRY_POINT = path.join(REPO_ROOT, "src", "renderer", "index.ts");
-const BUNDLE_ROOT = path.join(REPO_ROOT, ".cache", "remotion-bundle");
+
+/** Each renderer has its own source folder and bundle, so a change to one never rebuilds the other. */
+const RENDERERS = {
+  film: { source: "renderer", bundles: "remotion-bundle", compositionId: "Documentary" },
+  thumbnail: { source: "thumbnail-renderer", bundles: "remotion-bundle-thumbnail", compositionId: "Thumbnails" },
+} as const;
+export type RendererName = keyof typeof RENDERERS;
 
 export type WorkerTask =
   | {
@@ -23,9 +28,11 @@ export type WorkerTask =
       x264Preset: string;
       jpegQuality: number;
     }
-  | { id: string; type: "still"; output: string; frame: number };
+  | { id: string; type: "still"; output: string; frame: number; imageFormat?: "png" | "jpeg"; jpegQuality?: number };
 
 export interface WorkerRequest {
+  /** Which renderer to bundle and run. The film when left out. */
+  renderer?: RendererName;
   projectId: string;
   assetsDir: string;
   inputProps: unknown;
@@ -47,18 +54,18 @@ async function hashDirectory(dir: string, hash: crypto.Hash): Promise<void> {
 }
 
 /** Identifies the renderer code, so its bundle and chunks rebuild only when it changes. */
-export async function getRendererHash(): Promise<string> {
+export async function getRendererHash(renderer: RendererName = "film"): Promise<string> {
   const hash = crypto.createHash("sha256");
-  await hashDirectory(path.join(REPO_ROOT, "src", "renderer"), hash);
+  await hashDirectory(path.join(REPO_ROOT, "src", RENDERERS[renderer].source), hash);
   return hash.digest("hex").slice(0, 16);
 }
 
 /** Removes old bundles. Asset links are unlinked first, so originals are never followed. */
-function removeOldBundles(keep: string): void {
-  if (!existsSync(BUNDLE_ROOT)) return;
-  for (const name of readdirSync(BUNDLE_ROOT)) {
+function removeOldBundles(bundleRoot: string, keep: string): void {
+  if (!existsSync(bundleRoot)) return;
+  for (const name of readdirSync(bundleRoot)) {
     if (name === keep) continue;
-    const dir = path.join(BUNDLE_ROOT, name);
+    const dir = path.join(bundleRoot, name);
     const publicDir = path.join(dir, "public");
     if (existsSync(publicDir)) {
       for (const project of readdirSync(publicDir)) {
@@ -81,9 +88,11 @@ export function findNode(): string {
 }
 
 export async function runRenderWorker(request: WorkerRequest): Promise<void> {
-  const rendererHash = await getRendererHash();
-  const bundleDir = path.join(BUNDLE_ROOT, rendererHash);
-  removeOldBundles(rendererHash);
+  const renderer = RENDERERS[request.renderer ?? "film"];
+  const rendererHash = await getRendererHash(request.renderer);
+  const bundleRoot = path.join(REPO_ROOT, ".cache", renderer.bundles);
+  const bundleDir = path.join(bundleRoot, rendererHash);
+  removeOldBundles(bundleRoot, rendererHash);
 
   await fs.mkdir(request.workDir, { recursive: true });
   const id = crypto.randomBytes(6).toString("hex");
@@ -95,9 +104,9 @@ export async function runRenderWorker(request: WorkerRequest): Promise<void> {
     projectId: request.projectId,
     assetsDir: request.assetsDir,
     bundleDir,
-    entryPoint: ENTRY_POINT,
+    entryPoint: path.join(REPO_ROOT, "src", renderer.source, "index.ts"),
     inputPropsPath: propsPath,
-    compositionId: "Documentary",
+    compositionId: renderer.compositionId,
     browserExecutable: getLocalBrowserExecutable() ?? null,
     concurrency: request.concurrency,
     tasks: request.tasks,

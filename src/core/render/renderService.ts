@@ -20,6 +20,7 @@ import type { RenderMode } from "../../shared/types.js";
 export interface RenderServiceOptions {
   mode: RenderMode;
   sceneId?: string;
+  chapterId?: string;
   force?: boolean;
   onProgress?: (progress: number) => void;
 }
@@ -93,7 +94,7 @@ export class RenderService {
     options: RenderServiceOptions
   ): Promise<string[]> {
     const warnings: string[] = [];
-    if (options.mode === "scene") return warnings;
+    if (options.mode === "scene" || options.chapterId) return warnings;
 
     const report = await this.tc.validateTimeline(projectId);
     const isVoiceGap = (e: string) => e.includes("has no voice yet");
@@ -128,6 +129,7 @@ export class RenderService {
 
   private outputPathFor(root: string, projectId: string, options: RenderServiceOptions): string {
     const name = projectFileName(this.pm.resolveId(projectId));
+    if (options.chapterId) return path.join(root, "render", "preview", `${name}_${options.chapterId}.mp4`);
     if (options.mode === "final") return path.join(root, "render", "final", `${name}.mp4`);
     if (options.mode === "draft") return path.join(root, "render", "preview", `${name}_draft.mp4`);
     return path.join(root, "render", "preview", `${name}_${options.sceneId}.mp4`);
@@ -222,6 +224,12 @@ export class RenderService {
           throw new ValidationError(`Scene "${options.sceneId}" has no image yet.`);
         }
         chunks = [planSceneChunk(manifest, scene, profile, rendererHash, root)];
+      } else if (options.chapterId) {
+        const chapter = manifest.chapters.find((c) => c.chapterId === options.chapterId);
+        if (!chapter) throw new ValidationError(`Chapter "${options.chapterId}" not found.`);
+        const allChunks = planChunks(manifest, profile, rendererHash, root);
+        chunks = allChunks.filter((c) => c.firstFrame >= chapter.startFrame && c.lastFrame <= chapter.endFrame);
+        if (chunks.length === 0) throw new ValidationError(`No chunks found for chapter "${options.chapterId}".`);
       } else {
         chunks = planChunks(manifest, profile, rendererHash, root);
       }
@@ -305,7 +313,7 @@ export class RenderService {
         durationSeconds: validation.durationSeconds,
       });
 
-      if (options.mode === "final") {
+      if (options.mode === "final" && !options.chapterId) {
         const mix = await this.mixer.getRecord(projectId);
         await atomicWriteJson(path.join(root, "render", "final", "render.json"), {
           inputHash: fingerprint({ chunks: chunks.map((c) => c.hash), mix: mix?.inputHash ?? null }),

@@ -6,7 +6,7 @@ import { atomicWriteJson, readJsonFile } from "../../shared/atomic.js";
 import { ValidationError } from "../../shared/errors.js";
 import type { ProjectCheckpoints } from "../schemas/project.js";
 
-export const StageNames = ["research", "script", "storyboard", "images", "voice", "timeline", "mix", "render"] as const;
+export const StageNames = ["research", "script", "storyboard", "images", "voice", "timeline", "mix", "render", "publish"] as const;
 export type StageName = (typeof StageNames)[number];
 
 /** What each stage is built from. */
@@ -19,6 +19,7 @@ const UPSTREAM: Record<StageName, StageName[]> = {
   timeline: ["storyboard", "images", "voice"],
   mix: ["timeline"],
   render: ["timeline", "mix"],
+  publish: ["render"],
 };
 
 const APPROVAL: Partial<Record<StageName, keyof ProjectCheckpoints>> = {
@@ -138,6 +139,10 @@ export class StageGraph {
       }
       case "render": {
         const data = await readIf("render/final/render.json");
+        return data?.inputHash ?? null;
+      }
+      case "publish": {
+        const data = await readIf("publish/pack.json");
         return data?.inputHash ?? null;
       }
     }

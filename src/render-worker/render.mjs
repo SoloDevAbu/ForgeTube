@@ -68,6 +68,8 @@ async function main() {
           inputProps,
           output: temp,
           frame: task.frame,
+          imageFormat: task.imageFormat ?? "png",
+          jpegQuality: task.imageFormat === "jpeg" ? (task.jpegQuality ?? 92) : undefined,
           puppeteerInstance: browser,
         });
       } else {

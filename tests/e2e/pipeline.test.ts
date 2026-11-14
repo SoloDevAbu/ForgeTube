@@ -15,6 +15,8 @@ import { TimelineCompiler } from "../../src/core/timeline/timelineCompiler.js";
 import { JobManager } from "../../src/core/jobs/jobManager.js";
 import { RenderService } from "../../src/core/render/renderService.js";
 import { splitWords } from "../../src/core/script/scriptFormat.js";
+import { PublishManager } from "../../src/core/publish/publishManager.js";
+import { StageGraph } from "../../src/core/pipeline/stageGraph.js";
 
 const COLORS = ["navy", "teal", "maroon", "olive", "purple", "gray"];
 
@@ -150,4 +152,73 @@ describe("Pipeline from import to final render", () => {
     expect(second.chunksRendered).toBe(0);
     expect(second.chunksReused).toBe(first.chunksRendered + first.chunksReused);
   }, 600_000);
+
+  it("makes three thumbnails and packs the upload files from the measured voice", async () => {
+    const publish = new PublishManager(sample.pm, tc);
+    const write = async (name: string, content: string) => {
+      const p = path.join(sample.tmpDir, name);
+      await fs.writeFile(p, content, "utf-8");
+      return p;
+    };
+    await expect(publish.pack(SAMPLE_ID)).rejects.toThrow("publish import");
+
+    const thumbs = await publish.makeThumbnails(
+      SAMPLE_ID,
+      await write(
+        "thumbs.txt",
+        [
+          "A | img=scene_001 | THE *LOST* TOWER | layout=left | focus=0.7,0.4",
+          "B | img=scene_002 | WHY IT *FELL* | layout=bottom | accent=red",
+          "C | img=scene_003 | - | layout=center",
+        ].join("\n")
+      )
+    );
+    expect(thumbs.errors).toEqual([]);
+    expect(thumbs.files).toHaveLength(3);
+    for (const file of thumbs.files) {
+      const image = probe(file)[0]!;
+      expect([image.width, image.height]).toEqual([1280, 720]);
+      expect((await fs.stat(file)).size).toBeLessThan(2 * 1024 * 1024);
+    }
+    expect(existsSync(thumbs.sheet!)).toBe(true);
+
+    const meta = await publish.importMetadata(
+      SAMPLE_ID,
+      await write(
+        "meta.md",
+        [
+          "# titles",
+          "The Pharos of Alexandria: Rise and Fall of a Wonder",
+          "How the Lost Tower of Alexandria Guided Ships",
+          "Why Did the Lighthouse of Alexandria Fall?",
+          "# description",
+          "The story of the lighthouse that guided ships into Alexandria.",
+          "# hashtags",
+          "#Pharos #Alexandria #History",
+          "# tags",
+          "pharos, lighthouse of alexandria, seven wonders",
+        ].join("\n")
+      )
+    );
+    expect(meta.report.valid).toBe(true);
+    expect(meta.report.warnings.join(" ")).toContain("Thumbnail A repeats the title");
+
+    const packed = await publish.pack(SAMPLE_ID);
+    const dir = publish.getPublishDir(SAMPLE_ID);
+    const srt = await fs.readFile(path.join(dir, "subtitles.srt"), "utf-8");
+    expect(srt.startsWith("1\n00:00:0")).toBe(true);
+    expect(srt.replace(/\n/g, " ")).toContain("Long before the great harbours of the modern world,");
+    const lastCue = srt.trim().split("\n\n").at(-1)!.split("\n")[1]!.split(" --> ")[1]!;
+    const [h, m, s] = lastCue.replace(",", ".").split(":").map(Number) as [number, number, number];
+    expect(h * 3600 + m * 60 + s).toBeLessThanOrEqual(packed.durationSeconds + 1);
+
+    const description = await fs.readFile(path.join(dir, "description.txt"), "utf-8");
+    expect(description).toContain("Sample reference on the Pharos");
+    expect(description.trim().endsWith("#Pharos #Alexandria #History")).toBe(true);
+    expect((await fs.readFile(path.join(dir, "titles.txt"), "utf-8")).trim().split("\n")).toHaveLength(3);
+    expect(await fs.readFile(path.join(dir, "transcript.txt"), "utf-8")).not.toContain("[pause");
+
+    const status = await new StageGraph(sample.pm).getStatus(SAMPLE_ID);
+    expect(status.find((s) => s.stage === "publish")).toMatchObject({ built: true, stale: false });
+  }, 300_000);
 });

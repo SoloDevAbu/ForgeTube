@@ -10,6 +10,7 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
     .requiredOption("-p, --project <id>", "Project ID")
     .option("-m, --mode <mode>", "Render mode ('scene', 'draft', or 'final')", "draft")
     .option("-s, --scene <sceneId>", "Scene ID (required if mode is 'scene')")
+    .option("-c, --chapter <chapterId>", "Chapter ID to render alone")
     .option("--force", "Skip approval checks")
     .action(async (options) => {
       try {
@@ -31,6 +32,7 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
         const res = await rs.renderVideo(options.project, {
           mode: options.mode as any,
           sceneId: options.scene,
+          chapterId: options.chapter,
           force: options.force,
           onProgress: (p) => {
             const pct = Math.floor(p * 100);
@@ -54,7 +56,11 @@ export function registerRenderCommands(program: Command, rs: RenderService): voi
           console.log(`  Duration:     ${res.validation.durationSeconds.toFixed(2)}s`);
           console.log(`  File Size:    ${(res.validation.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`);
           console.log(`  Audio Stream: ${res.validation.hasAudio ? "Present" : "None"}`);
-          console.log(`  You can open and play this MP4 file in any local media player.\n`);
+          console.log(`  You can open and play this MP4 file in any local media player.`);
+          if (options.mode === "final" && !options.chapter) {
+            console.log(`  Next: video-studio thumbnail brief --project ${options.project}`);
+          }
+          console.log();
         });
       } catch (err: any) {
         printError(err, program.opts().json);

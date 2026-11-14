@@ -58,6 +58,10 @@ Run `/doc-film` to go through them, or use each skill alone.
 | Voice | Code | `audio voice`, then `timeline compile`, `storyboard rebalance` |
 | Sound | Code | `audio sfx render`, `audio music generate`, `audio music plan`, `audio levels`, `audio mix`, `audio approve` |
 | Render | Code | `render --mode scene`, `draft`, `final` |
+| Thumbnails | `doc-thumbnail` skill | `thumbnail brief`, `make` |
+| Publish | `doc-publish` skill | `publish brief`, `import`, `pack` |
+
+The upload package goes to `publish/`: three thumbnails, three titles, the description with chapters and hashtags, tags, `subtitles.srt` and `transcript.txt`. Subtitle and chapter times come from the measured voice.
 
 Each stage records a hash of its inputs. When an input changes, later stages show as stale in `pipeline status`, and their work is kept.
 
@@ -69,7 +73,8 @@ Each stage records a hash of its inputs. When an input changes, later stages sho
 - Never write IDs, filenames, timing or JSON that the CLI derives.
 - Read CLI output, not project JSON. Commands print only problems. Use `--json` only when you need it.
 - Voice, music choice, timeline, mix and render use no LLM.
-- Review images with contact sheets, and audio with earshot numbers.
+- Review images with contact sheets, thumbnails with `publish/thumbnails/review.jpg`, and audio with earshot numbers.
+- For thumbnails and titles, search the web once or twice for the top videos on the topic. Write from the publish brief, not the script.
 - For a second version, read the chapter brief. It already carries the first version's telling and its images.
 - Don't start subagents unless asked.
 
